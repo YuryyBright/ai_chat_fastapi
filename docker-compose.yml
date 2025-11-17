@@ -1,0 +1,93 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  # Main LLM Service
+  llm-service:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: llm-service
+    ports:
+      - "8000:8000"
+    environment:
+      # Application Settings
+      - ENVIRONMENT=production
+      - LOG_LEVEL=INFO
+      
+      # Ollama Connection
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - OLLAMA_DEFAULT_MODEL=llama2
+      
+      # HuggingFace Settings
+      - HUGGINGFACE_CACHE_DIR=/app/models/huggingface
+      - HUGGINGFACE_DEFAULT_MODEL=gpt2
+      
+      # OpenAI Settings (set your API key)
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - OPENAI_DEFAULT_MODEL=gpt-3.5-turbo
+      
+      # Enabled Providers
+      - ENABLED_PROVIDERS=["ollama", "huggingface", "openai"]
+      
+      # Generation Settings
+      - MAX_TOKENS=2048
+      - DEFAULT_TEMPERATURE=0.7
+      
+      # Storage Paths
+      - DATA_DIR=/app/data
+      - MODELS_DIR=/app/models
+      - TRAINING_OUTPUT_DIR=/app/models/fine-tuned
+    
+    volumes:
+      - ./data:/app/data
+      - ./models:/app/models
+      - huggingface-cache:/app/models/huggingface
+    
+    depends_on:
+      - ollama
+    
+    networks:
+      - llm-network
+    
+    restart: unless-stopped
+    
+    # GPU support (uncomment if you have NVIDIA GPU)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+  
+  # Ollama Service for Local Models
+  ollama:
+    image: ollama/ollama:latest
+    container_name: ollama
+    ports:
+      - "11434:11434"
+    volumes:
+      - ollama-data:/root/.ollama
+    networks:
+      - llm-network
+    restart: unless-stopped
+    
+    # GPU support for Ollama (uncomment if you have NVIDIA GPU)
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  ollama-data:
+    driver: local
+  huggingface-cache:
+    driver: local
+
+networks:
+  llm-network:
+    driver: bridge
