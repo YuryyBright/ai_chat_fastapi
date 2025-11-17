@@ -23,7 +23,7 @@ import logging
 logger = logging.getLogger(__name__)
 
 
-class LocallProvider(BaseLLMProvider):
+class LocalProvider(BaseLLMProvider):
     """
     Універсальний провайдер для будь-якого локального OpenAI-сумісного серверу
     """

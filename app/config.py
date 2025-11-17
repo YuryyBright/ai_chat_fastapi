@@ -61,7 +61,7 @@ class Settings(BaseSettings):
     
     # Provider Settings
     enabled_providers: List[str] = Field(
-        default=["ollama", "huggingface", "openai"],
+        default=["ollama", "huggingface", "openai", "local_provider"],
         description="List of enabled LLM providers"
     )
     
@@ -189,7 +189,7 @@ class Settings(BaseSettings):
     @validator("enabled_providers")
     def validate_providers(cls, v):
         """Validate that enabled providers are supported"""
-        supported = ["ollama", "huggingface", "openai"]
+        supported = ["ollama", "huggingface", "openai", "local_provider"]
         for provider in v:
             if provider not in supported:
                 raise ValueError(f"Unsupported provider: {provider}")
