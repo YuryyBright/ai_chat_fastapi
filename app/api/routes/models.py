@@ -7,7 +7,13 @@ from fastapi import APIRouter, Request
 from app.schemas.models import ModelInfo, ModelListResponse
 from typing import List
 import logging
-
+from fastapi import APIRouter, BackgroundTasks
+from fastapi.responses import StreamingResponse
+from huggingface_hub import snapshot_download
+import json
+import os
+from pathlib import Path
+from pydantic import BaseModel
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
@@ -76,3 +82,37 @@ async def check_providers_health(request: Request):
         "status": "healthy" if all(health_status.values()) else "degraded",
         "providers": health_status
     }
+
+# ← Правильна модель для JSON-body
+class PullModelRequest(BaseModel):
+    model_name: str
+    provider: str = "huggingface"
+
+async def progress_generator(repo_id: str, cache_dir: str):
+    # Спочатку надсилаємо "початок"
+    yield f"data: {json.dumps({'status': 'progress', 'progress': 0.0})}\n\n"
+
+    try:
+        # Просто запускаємо завантаження — huggingface_hub сам виводить tqdm у консоль сервера
+        snapshot_download(
+            repo_id=repo_id,
+            cache_dir=cache_dir,
+            resume_download=True,
+            local_files_only=False,
+        )
+        yield f"data: {json.dumps({'status': 'complete', 'model': repo_id})}\n\n"
+    except Exception as e:
+        yield f"data: {json.dumps({'status': 'error', 'error': str(e)})}\n\n"
+
+
+@router.post("/pull")
+async def pull_model(request: PullModelRequest):
+    if request.provider != "huggingface":
+        return {"error": "Only huggingface provider supported"}
+
+    cache_dir = os.getenv("HUGGINGFACE_CACHE_DIR", "./models/huggingface")
+
+    return StreamingResponse(
+        progress_generator(request.model_name, cache_dir),
+        media_type="text/event-stream",
+    )
