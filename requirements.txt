@@ -13,7 +13,7 @@ httpx==0.26.0
 # LLM Providers
 transformers==4.37.0
 accelerate==0.26.1
-sentencepiece==0.1.99
+sentencepiece==0.2.0
 protobuf==4.25.2
 
 # OpenAI

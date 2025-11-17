@@ -107,6 +107,14 @@ class Settings(BaseSettings):
         description="Default OpenAI model"
     )
     
+    # Local Universal Provider (tabbyAPI, llama.cpp, vLLM, etc.)
+    local_base_url: str = Field(
+        default="http://127.0.0.1:8080/v1",
+        description="Base URL for any OpenAI-compatible local server"
+    )
+    local_api_key: str = Field(default="not-needed")
+    local_timeout: int = Field(default=600)
+    local_default_model: str = Field(default="local-model")
     # Generation Settings
     max_tokens: int = Field(
         default=2048,
