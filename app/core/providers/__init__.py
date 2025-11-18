@@ -30,14 +30,14 @@ class ProviderManager:
         """
         logger.info("Ініціалізація локального провайдера...")
         
-        # Створюємо єдиний локальний провайдер
+        # Створюємо єдиний локальний провайдер з правильною назвою
         self.providers["local_provider"] = LocalProvider({
             "models_dir": settings.models_dir or "./models",
             "context_size": settings.context_size or 8192,
             "batch_size": settings.batch_size or 512,
             "threads": settings.n_threads or None,  # None = auto
-            "use_gpu": settings.use_gpu if hasattr(settings, 'use_gpu') else True,
-            "gpu_layers": settings.gpu_layers if hasattr(settings, 'gpu_layers') else -1,
+            "use_gpu": getattr(settings, 'use_gpu', True),
+            "gpu_layers": getattr(settings, 'gpu_layers', -1),  # -1 = всі шари
         })
         
         logger.info("✓ Локальний провайдер створено")
@@ -65,12 +65,12 @@ class ProviderManager:
             except Exception as e:
                 logger.error(f"✗ Помилка очищення провайдера '{name}': {e}")
     
-    def get_provider(self, provider_name: str = "local_unified") -> BaseLLMProvider:
+    def get_provider(self, provider_name: str = "local_provider") -> BaseLLMProvider:
         """
         Отримати провайдер за іменем
         
         Args:
-            provider_name: Ім'я провайдера (за замовчуванням "local_unified")
+            provider_name: Ім'я провайдера (за замовчуванням "local_provider")
             
         Returns:
             Інстанс провайдера
@@ -123,5 +123,5 @@ class ProviderManager:
 __all__ = [
     "ProviderManager",
     "BaseLLMProvider",
-    "LocalUnifiedProvider",
+    "LocalProvider",
 ]

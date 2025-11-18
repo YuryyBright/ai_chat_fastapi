@@ -1,7 +1,7 @@
 # cli.py
 """
 Оновлений CLI для Local LLM Service (2025)
-Повністю сумісний з новим API v2 та OpenAI-сумісним v1
+Виправлено парсинг відповідей та стрімінг
 """
 
 import click
@@ -45,20 +45,28 @@ class LLMClient:
         try:
             with self.session.post(url, json=json_data, stream=True, timeout=3600) as r:
                 r.raise_for_status()
+                buffer = ""
+                
                 for line in r.iter_lines(decode_unicode=True):
                     if not line:
                         continue
+                    
                     line = line.strip()
+                    
                     if line.startswith("data: "):
-                        data = line[6:]
+                        data = line[6:].strip()
+                        
                         if data in ("[DONE]", "[DONE]\n"):
                             break
+                        
                         if data == "":
                             continue
+                        
                         try:
                             yield json.loads(data)
                         except json.JSONDecodeError as e:
-                            console.print(f"[dim]JSON помилка: {data} → {e}[/dim]")
+                            console.print(f"[dim red]JSON помилка: {data[:100]}[/dim red]")
+                            
         except requests.exceptions.RequestException as e:
             console.print(f"[red]Помилка з'єднання:[/red] {e}")
             raise click.Abort()
@@ -165,22 +173,36 @@ def ask(client: LLMClient, prompt, model, temp, max_tokens, no_stream):
                 p.add_task("gen")
                 result = client.generate(prompt, model, stream=False,
                                         temperature=temp, max_tokens=max_tokens)
-            text = result.get("generated_text") or result.get("choices", [{}])[0].get("message", {}).get("content", "")
+            
+            # Парсинг відповіді v2 API
+            text = result.get("generated_text", "")
+            
             console.print(f"\n[bold green]Відповідь:[/bold green]\n")
             console.print(Markdown(text))
         else:
-            console.print("[bold green]Відповідь:[/bold green] ", end="")
+            console.print("[bold green]Відповідь:[/bold green]\n")
             full = ""
+            
             for chunk in client.generate(prompt, model, stream=True,
                                        temperature=temp, max_tokens=max_tokens):
-                if client.version.startswith("v1"):
-                    text = chunk.get("choices", [{}])[0].get("delta", {}).get("content", "")
-                else:
-                    text = chunk.get("text", "")
+                # Парсинг v2 API стрімінгу
+                text = chunk.get("text", "")
+                done = chunk.get("done", False)
+                error = chunk.get("error")
+                
+                if error:
+                    console.print(f"\n[red]Помилка:[/red] {error}")
+                    break
+                
                 if text:
                     console.print(text, end="")
                     full += text
+                
+                if done:
+                    break
+            
             console.print("\n")
+            
     except Exception as e:
         console.print(f"[red]Помилка генерації:[/red] {e}")
         raise click.Abort()
@@ -200,9 +222,11 @@ def models(client: LLMClient):
 
         for m in data.get("models", []):
             meta = m.get("metadata", {})
-            size = meta.get("size", "невідомо")
+            size = meta.get("size_mb", meta.get("size", "невідомо"))
+            if isinstance(size, (int, float)):
+                size = f"{size} MB"
             typ = meta.get("type", "gguf")
-            table.add_row(m["name"], m["status"], size, typ)
+            table.add_row(m["name"], m["status"], str(size), typ)
 
         console.print(table)
         console.print(f"[bold]Всього:[/bold] {data.get('total', 0)}")

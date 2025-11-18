@@ -1,8 +1,7 @@
-
 # app/api/routes/generation.py
 """
 API роути для генерації тексту
-Повністю сумісний з LocalProvider + SSE streaming
+Виправлені проблеми зі стрімінгом
 """
 
 from fastapi import APIRouter, Request, HTTPException, Depends
@@ -47,7 +46,6 @@ async def generate_text(
             detail="Для потокової генерації використовуйте POST /generate/stream"
         )
 
-    # У тебе тільки local_provider → завжди використовуємо його
     provider = manager.get_provider("local_provider")
 
     logger.info(
@@ -57,9 +55,10 @@ async def generate_text(
 
     try:
         response = await provider.generate(request)
+        logger.info(f"✓ Згенеровано {len(response.generated_text)} символів")
         return response
     except Exception as e:
-        logger.error(f"Помилка генерації: {e}")
+        logger.error(f"✗ Помилка генерації: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -83,25 +82,23 @@ async def generate_text_stream(
 
     async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            logger.info(f"Starting generate stream")
+            token_count = 0
+            
             async for token in provider.generate_stream(request):
-                logger.info("Генеруємо токен: {token}")
-                if token.strip():  # відправляємо тільки непорожні токени
+                if token:  # відправляємо будь-який непорожній текст
                     chunk = StreamChunk(text=token, done=False)
-                    logger.info(f"Chunk: {chunk}")
                     yield f"data: {chunk.model_dump_json()}\n\n"
+                    token_count += 1
 
             # Кінець генерації
+            logger.info(f"✓ Згенеровано {token_count} токенів")
             final = StreamChunk(text="", done=True)
             yield f"data: {final.model_dump_json()}\n\n"
 
         except Exception as e:
-            logger.error(f"Помилка в потоковій генерації: {e}", exc_info=True)
+            logger.error(f"✗ Помилка в потоковій генерації: {e}", exc_info=True)
             error_chunk = StreamChunk(text="", done=True, error=str(e))
             yield f"data: {error_chunk.model_dump_json()}\n\n"
-
-        # Додатковий порожній рядок — допомагає клієнтам
-        yield "\n"
 
     return StreamingResponse(
         event_generator(),
