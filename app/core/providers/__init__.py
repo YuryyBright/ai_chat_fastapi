@@ -1,24 +1,23 @@
 # app/core/providers/__init__.py
 """
-Provider manager for handling multiple LLM providers
+Менеджер провайдерів - тільки локальні моделі
 """
 
 from typing import Dict, Optional
-from app.core.providers.base import BaseLLMProvider
-from app.core.providers.ollama_provider import OllamaProvider
-from app.core.providers.huggingface_provider import HuggingFaceProvider
-from app.core.providers.openai_provider import OpenAIProvider
-from app.core.providers.local_provider import LocalProvider
-from app.config import settings
-from app.core.exceptions import ProviderError
 import logging
+
+from app.core.providers.base import BaseLLMProvider
+from app.core.providers.local_provider import LocalProvider
+from app.core.exceptions import ProviderError
+from app.config import settings
 
 logger = logging.getLogger(__name__)
 
 
 class ProviderManager:
     """
-    Manages multiple LLM providers and routes requests to appropriate provider
+    Менеджер для локального провайдера
+    Управління моделями без зовнішніх API
     """
     
     def __init__(self):
@@ -26,80 +25,72 @@ class ProviderManager:
         self._initialize_providers()
     
     def _initialize_providers(self) -> None:
-        """Initialize all enabled providers based on configuration"""
+        """
+        Ініціалізація локального провайдера
+        """
+        logger.info("Ініціалізація локального провайдера...")
         
-        if "ollama" in settings.enabled_providers:
-            self.providers["ollama"] = OllamaProvider({
-                "base_url": settings.ollama_base_url,
-                "timeout": settings.ollama_timeout,
-                "default_model": settings.ollama_default_model
-            })
+        # Створюємо єдиний локальний провайдер
+        self.providers["local_unified"] = LocalProvider({
+            "models_dir": settings.models_dir or "./models",
+            "context_size": settings.context_size or 8192,
+            "batch_size": settings.batch_size or 512,
+            "threads": settings.n_threads or None,  # None = auto
+            "use_gpu": settings.use_gpu if hasattr(settings, 'use_gpu') else True,
+            "gpu_layers": settings.gpu_layers if hasattr(settings, 'gpu_layers') else -1,
+        })
         
-        if "huggingface" in settings.enabled_providers:
-            self.providers["huggingface"] = HuggingFaceProvider({
-                "cache_dir": settings.huggingface_cache_dir,
-                "default_model": settings.huggingface_default_model,
-                "api_key": settings.huggingface_api_key
-            })
-        
-        if "openai" in settings.enabled_providers:
-            self.providers["openai"] = OpenAIProvider({
-                "api_key": settings.openai_api_key,
-                "organization": settings.openai_organization,
-                "default_model": settings.openai_default_model
-            })
-        if "local_provider" in settings.enabled_providers:
-            self.providers['local_provider'] = LocalProvider(
-                {
-                    'local_timeout': settings.local_timeout,
-                    'local_default_model': settings.local_default_model
-                }
-            )
+        logger.info("✓ Локальний провайдер створено")
     
     async def initialize(self) -> None:
-        """Initialize all providers"""
+        """
+        Асинхронна ініціалізація всіх провайдерів
+        """
         for name, provider in self.providers.items():
             try:
                 await provider.initialize()
-                logger.info(f"Provider '{name}' initialized successfully")
+                logger.info(f"✓ Провайдер '{name}' успішно ініціалізовано")
             except Exception as e:
-                logger.error(f"Failed to initialize provider '{name}': {e}")
+                logger.error(f"✗ Помилка ініціалізації провайдера '{name}': {e}")
+                raise
     
     async def cleanup(self) -> None:
-        """Cleanup all providers"""
+        """
+        Очищення всіх провайдерів
+        """
         for name, provider in self.providers.items():
             try:
                 await provider.cleanup()
-                logger.info(f"Provider '{name}' cleaned up")
+                logger.info(f"✓ Провайдер '{name}' очищено")
             except Exception as e:
-                logger.error(f"Failed to cleanup provider '{name}': {e}")
+                logger.error(f"✗ Помилка очищення провайдера '{name}': {e}")
     
-    def get_provider(self, provider_name: str) -> BaseLLMProvider:
+    def get_provider(self, provider_name: str = "local_unified") -> BaseLLMProvider:
         """
-        Get provider by name
+        Отримати провайдер за іменем
         
         Args:
-            provider_name: Name of the provider
+            provider_name: Ім'я провайдера (за замовчуванням "local_unified")
             
         Returns:
-            Provider instance
+            Інстанс провайдера
             
         Raises:
-            ProviderError: If provider not found or not enabled
+            ProviderError: Якщо провайдер не знайдено
         """
         if provider_name not in self.providers:
             raise ProviderError(
-                f"Provider '{provider_name}' not found or not enabled. "
-                f"Available providers: {list(self.providers.keys())}"
+                f"Провайдер '{provider_name}' не знайдено. "
+                f"Доступні провайдери: {list(self.providers.keys())}"
             )
         return self.providers[provider_name]
     
     async def get_all_models(self) -> Dict[str, list]:
         """
-        Get all available models from all providers
+        Отримати всі доступні моделі
         
         Returns:
-            Dictionary mapping provider names to model lists
+            Словник: {provider_name: [model_names]}
         """
         all_models = {}
         for name, provider in self.providers.items():
@@ -107,22 +98,30 @@ class ProviderManager:
                 models = await provider.list_models()
                 all_models[name] = models
             except Exception as e:
-                logger.error(f"Failed to list models for provider '{name}': {e}")
+                logger.error(f"Помилка отримання моделей для '{name}': {e}")
                 all_models[name] = []
         return all_models
     
     async def health_check(self) -> Dict[str, bool]:
         """
-        Check health status of all providers
+        Перевірка стану всіх провайдерів
         
         Returns:
-            Dictionary mapping provider names to availability status
+            Словник: {provider_name: is_available}
         """
         health_status = {}
         for name, provider in self.providers.items():
             try:
                 health_status[name] = await provider.is_available()
             except Exception as e:
-                logger.error(f"Health check failed for provider '{name}': {e}")
+                logger.error(f"Помилка перевірки здоров'я '{name}': {e}")
                 health_status[name] = False
         return health_status
+
+
+# Зручний експорт
+__all__ = [
+    "ProviderManager",
+    "BaseLLMProvider",
+    "LocalUnifiedProvider",
+]

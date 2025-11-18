@@ -1,77 +1,78 @@
 # app/main.py
 """
-FastAPI LLM Service - Main Application Entry Point
-
-This service provides a unified interface for multiple LLM providers including:
-- Ollama (local models)
-- HuggingFace models
-- OpenAI GPT models
-- Custom fine-tuned models
-
-Features:
-- Streaming and non-streaming text generation
-- Model fine-tuning capabilities
-- Docker support
-- Comprehensive error handling
-- Request validation with Pydantic
+Головний файл FastAPI додатку для локальної роботи з LLM
 """
 
-from fastapi import FastAPI, HTTPException, Depends
-from fastapi.responses import StreamingResponse
+from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 import logging
-from typing import AsyncGenerator
 
 from app.config import settings
-from app.api.routes import generation, models, training
 from app.core.providers import ProviderManager
-from app.core.exceptions import setup_exception_handlers
+from app.core.model_downloader import ModelDownloader
+from app.api.routes import generation, models
 
-# Configure logging
+# Налаштування логування
 logging.basicConfig(
-    level=getattr(logging, settings.log_level),
+    level=settings.log_level,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
 
 @asynccontextmanager
-async def lifespan(app: FastAPI) -> AsyncGenerator:
+async def lifespan(app: FastAPI):
     """
-    Application lifespan context manager.
-    Handles startup and shutdown events.
+    Lifecycle manager для додатку
     """
     # Startup
-    logger.info("Starting LLM Service...")
-    logger.info(f"Environment: {settings.environment}")
-    logger.info(f"Enabled providers: {settings.enabled_providers}")
+    logger.info("=" * 60)
+    logger.info(f"🚀 Запуск {settings.app_name} v{settings.version}")
+    logger.info("=" * 60)
     
-    # Initialize provider manager
-    app.state.provider_manager = ProviderManager()
-    await app.state.provider_manager.initialize()
+    # Ініціалізація провайдерів
+    logger.info("📦 Ініціалізація локального провайдера...")
+    provider_manager = ProviderManager()
+    await provider_manager.initialize()
+    app.state.provider_manager = provider_manager
     
-    logger.info("LLM Service started successfully")
+    # Ініціалізація завантажувача моделей
+    logger.info("📥 Ініціалізація завантажувача моделей...")
+    model_downloader = ModelDownloader(models_dir=settings.models_dir)
+    app.state.model_downloader = model_downloader
+    
+    # Перевірка доступних моделей
+    all_models = await provider_manager.get_all_models()
+    total_models = sum(len(models) for models in all_models.values())
+    logger.info(f"✓ Знайдено {total_models} локальних моделей")
+    
+    if total_models == 0:
+        logger.warning("⚠️  Немає локальних моделей!")
+        logger.info("💡 Завантажте моделі через API /models/download або розмістіть їх в директорії ./models")
+    
+    logger.info("=" * 60)
+    logger.info(f"✓ Сервер готовий: http://{settings.host}:{settings.port}")
+    logger.info(f"📚 Документація: http://{settings.host}:{settings.port}/docs")
+    logger.info("=" * 60)
     
     yield
     
     # Shutdown
-    logger.info("Shutting down LLM Service...")
-    await app.state.provider_manager.cleanup()
-    logger.info("LLM Service stopped")
+    logger.info("🛑 Зупинка сервера...")
+    await provider_manager.cleanup()
+    logger.info("✓ Ресурси звільнено")
 
 
-# Initialize FastAPI application
+# Створення FastAPI додатку
 app = FastAPI(
     title=settings.app_name,
-    description="Unified API for multiple LLM providers",
     version=settings.version,
-    docs_url="/docs" if settings.environment != "production" else None,
-    redoc_url="/redoc" if settings.environment != "production" else None,
+    description="Локальний сервіс для роботи з LLM моделями без зовнішніх API",
     lifespan=lifespan
 )
 
-# Setup CORS
+# CORS
 app.add_middleware(
     CORSMiddleware,
     allow_origins=settings.cors_origins,
@@ -80,52 +81,60 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Setup exception handlers
-setup_exception_handlers(app)
-
-# Include routers
+# Підключення роутів
 app.include_router(
     generation.router,
-    prefix="/api/v1/generation",
-    tags=["Text Generation"]
+    prefix="/generate",
+    tags=["Generation"]
 )
+
 app.include_router(
     models.router,
-    prefix="/api/v1/models",
-    tags=["Model Management"]
-)
-app.include_router(
-    training.router,
-    prefix="/api/v1/training",
-    tags=["Model Training"]
+    prefix="/models",
+    tags=["Models"]
 )
 
 
 @app.get("/")
 async def root():
-    """Root endpoint - health check"""
+    """
+    Кореневий ендпоінт
+    """
     return {
-        "service": settings.app_name,
+        "name": settings.app_name,
         "version": settings.version,
-        "status": "operational",
-        "environment": settings.environment
+        "status": "online",
+        "mode": "local_only",
+        "docs": "/docs",
+        "endpoints": {
+            "models": "/models/list",
+            "health": "/models/health",
+            "generate": "/generate",
+            "stream": "/generate/stream",
+            "download": "/models/download",
+            "search": "/models/search"
+        }
     }
 
 
 @app.get("/health")
 async def health_check():
-    """Detailed health check endpoint"""
+    """
+    Перевірка здоров'я сервісу
+    """
+    provider_manager: ProviderManager = app.state.provider_manager
+    health_status = await provider_manager.health_check()
+    
     return {
-        "status": "healthy",
-        "providers": {
-            provider: "available" 
-            for provider in settings.enabled_providers
-        }
+        "status": "healthy" if all(health_status.values()) else "degraded",
+        "providers": health_status,
+        "version": settings.version
     }
 
 
 if __name__ == "__main__":
     import uvicorn
+    
     uvicorn.run(
         "app.main:app",
         host=settings.host,

@@ -1,289 +1,267 @@
 # cli.py
 """
-Command-line interface for LLM Service
-Provides convenient CLI commands for interacting with the service
+Оновлений CLI для Local LLM Service (2025)
+Повністю сумісний з новим API v2
 """
 
 import click
 import requests
 import json
-from typing import Optional
+import time
+from typing import Optional, Generator
 from rich.console import Console
 from rich.table import Table
-from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, DownloadColumn, TransferSpeedColumn, TimeRemainingColumn
+from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
+from rich.live import Live
+from rich.panel import Panel
+from rich.syntax import Syntax
 
 console = Console()
 
 
 class LLMClient:
-    """Client for interacting with LLM Service API"""
+    """Клієнт для взаємодії з Local LLM Service API"""
     
     def __init__(self, base_url: str = "http://localhost:8000"):
-        self.base_url = base_url
-    
-    def generate(
-        self,
-        prompt: str,
-        provider: str = "ollama",
-        model: Optional[str] = None,
-        stream: bool = False,
-        **kwargs
-    ):
-        """Generate text"""
-        url = f"{self.base_url}/api/v1/generation/generate"
-        if stream:
-            url = f"{self.base_url}/api/v1/generation/generate/stream"
-        
+        self.base_url = base_url.rstrip("/")
+        self.session = requests.Session()
+        self.session.headers.update({"Content-Type": "application/json"})
+
+    def _stream_sse(self, url: str, json_data: dict) -> Generator[dict, None, None]:
+        """Універсальний генератор для Server-Sent Events (SSE)"""
+        with self.session.post(url, json=json_data, stream=True, timeout=3600) as r:
+            r.raise_for_status()
+            for line in r.iter_lines():
+                if line:
+                    decoded = line.decode("utf-8").strip()
+                    if decoded.startswith("data: "):
+                        data_str = decoded[6:]
+                        if data_str == "[DONE]":
+                            break
+                        try:
+                            yield json.loads(data_str)
+                        except json.JSONDecodeError:
+                            console.print(f"[dim]Не вдалося розпарсити: {data_str}[/dim]")
+
+    def generate(self, prompt: str, model: Optional[str] = None, stream: bool = True, **kwargs):
+        url = f"{self.base_url}/generate/stream" if stream else f"{self.base_url}/generate"
         payload = {
             "prompt": prompt,
-            "provider": provider,
             "model": model,
-            "stream": stream,
             **kwargs
         }
-        
         if stream:
-            with requests.post(url, json=payload, stream=True) as response:
-                for line in response.iter_lines():
-                    if line:
-                        data = json.loads(line.decode('utf-8').replace('data: ', ''))
-                        if not data.get('done'):
-                            yield data['text']
+            return self._stream_sse(url, payload)
         else:
-            response = requests.post(url, json=payload)
-            response.raise_for_status()
-            return response.json()
-    
-    def list_models(self, provider: Optional[str] = None):
-        """List available models"""
-        if provider:
-            url = f"{self.base_url}/api/v1/models/list/{provider}"
-        else:
-            url = f"{self.base_url}/api/v1/models/list"
-        
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
-    
-    def health_check(self):
-        """Check service health"""
-        url = f"{self.base_url}/api/v1/models/health"
-        response = requests.get(url)
-        response.raise_for_status()
-        return response.json()
+            resp = self.session.post(url, json=payload)
+            resp.raise_for_status()
+            return resp.json()
 
-    def pull_model(self, model_name: str, provider: str = "huggingface"):
-        """Download model from Hugging Face"""
-        url = f"{self.base_url}/api/v1/models/pull"
+    def list_models(self):
+        resp = self.session.get(f"{self.base_url}/models/list")
+        resp.raise_for_status()
+        return resp.json()
+
+    def download_model(self, repo_id: str, filename: Optional[str] = None, model_type: str = "gguf"):
+        url = f"{self.base_url}/models/download"
         payload = {
-            "model_name": model_name,
-            "provider": provider
+            "repo_id": repo_id,
+            "model_type": model_type,
+            "filename": filename
         }
-        
-        with requests.post(url, json=payload, stream=True) as response:
-            response.raise_for_status()
-            total = None
-            downloaded = 0
-            
-            with Progress(
-                SpinnerColumn(),
-                TextColumn("[progress.description]{task.description}"),
-                BarColumn(),
-                DownloadColumn(),
-                TransferSpeedColumn(),
-                TimeRemainingColumn(),
-                console=console
-            ) as progress:
-                task = progress.add_task(f"[cyan]Downloading {model_name}...", total=100)
-                
-                for line in response.iter_lines():
-                    if line:
-                        data = json.loads(line.decode('utf-8').lstrip('data: ').strip())
-                        
-                        if data.get("status") == "progress":
-                            progress.update(task, completed=data["progress"])
-                        elif data.get("status") == "complete":
-                            progress.update(task, completed=100)
-                            console.print(f"\n[bold green]Model '{model_name}' successfully downloaded and cached![/bold green]")
-                        elif data.get("status") == "error":
-                            console.print(f"\n[bold red]Error: {data.get('error')}[/bold red]")
-                            return
+        return self._stream_sse(url, payload)
+
+    def search_models(self, query: str = "", limit: int = 20):
+        resp = self.session.post(
+            f"{self.base_url}/models/search",
+            json={"query": query, "limit": limit}
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    def list_repo_files(self, repo_id: str):
+        resp = self.session.get(f"{self.base_url}/models/files/{repo_id}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def delete_model(self, model_name: str):
+        resp = self.session.delete(f"{self.base_url}/models/delete", json={"model_name": model_name})
+        resp.raise_for_status()
+        return resp.json()
+
+    def model_info(self, model_name: str):
+        resp = self.session.get(f"{self.base_url}/models/info/{model_name}")
+        resp.raise_for_status()
+        return resp.json()
+
+    def health(self):
+        resp = self.session.get(f"{self.base_url}/health")
+        resp.raise_for_status()
+        return resp.json()
 
 
 @click.group()
-@click.option('--url', default='http://localhost:8000', help='API base URL')
+@click.option('--url', '-u', default='http://localhost:8000', help='Базова URL API (за замовчуванням: http://localhost:8000)')
 @click.pass_context
 def cli(ctx, url):
-    """LLM Service CLI - Interact with the LLM service from command line"""
+    """Local LLM Service CLI — керування локальними моделями та генерація тексту"""
     ctx.obj = LLMClient(base_url=url)
 
 
-# === Існуючі команди (generate, models, health, batch) без змін ===
 @cli.command()
-@click.argument('prompt')
-@click.option('--provider', '-p', default='ollama', help='LLM provider')
-@click.option('--model', '-m', default=None, help='Model name')
-@click.option('--stream/--no-stream', default=False, help='Enable streaming')
-@click.option('--temperature', '-t', default=0.7, type=float, help='Temperature')
-@click.option('--max-tokens', default=500, type=int, help='Max tokens')
+@click.argument('prompt', nargs=-1)
+@click.option('--model', '-m', help='Назва моделі (якщо не вказано — перша доступна)')
+@click.option('--temp', '-t', 'temperature', type=float, default=0.7, help='Температура (0.0–2.0)')
+@click.option('--max-tokens', type=int, default=1024, help='Максимум токенів')
+@click.option('--no-stream', is_flag=True, help='Вимкнути потокову відповідь')
 @click.pass_obj
-def generate(client, prompt, provider, model, stream, temperature, max_tokens):
-    """Generate text from a prompt"""
-    console.print(f"\n[bold cyan]Prompt:[/bold cyan] {prompt}\n")
-    
-    if stream:
-        console.print("[bold green]Response:[/bold green] ", end="")
-        for chunk in client.generate(
-            prompt=prompt,
-            provider=provider,
-            model=model,
-            stream=True,
-            temperature=temperature,
-            max_tokens=max_tokens
-        ):
-            console.print(chunk, end="")
-        console.print("\n")
+def ask(client: LLMClient, prompt, model, temperature, max_tokens, no_stream):
+    """Запитати модель (інтерактивно або одноразово)"""
+    if not prompt:
+        click.echo("Введіть промпт:")
+        prompt = click.get_text_stream('stdin').readline().rstrip()
     else:
-        with Progress(
-            SpinnerColumn(),
-            TextColumn("[progress.description]{task.description}"),
-            console=console
-        ) as progress:
-            task = progress.add_task("Generating...", total=None)
-            result = client.generate(
-                prompt=prompt,
-                provider=provider,
-                model=model,
-                temperature=temperature,
-                max_tokens=max_tokens
-            )
+        prompt = " ".join(prompt)
+
+    console.print(f"[bold cyan]Промпт:[/bold cyan] {prompt}\n")
+
+    if no_stream:
+        with Progress(SpinnerColumn(), TextColumn("Генерація..."), console=console) as progress:
+            task = progress.add_task("generate")
+            result = client.generate(prompt, model, stream=False,
+                                    temperature=temperature, max_tokens=max_tokens)
             progress.remove_task(task)
-        
-        console.print(f"\n[bold green]Response:[/bold green]\n{result['generated_text']}\n")
-        console.print(f"[dim]Model: {result['model']} | "
-                     f"Time: {result['generation_time']:.2f}s | "
-                     f"Tokens: {result.get('tokens_used', 'N/A')}[/dim]")
+        console.print(f"[bold green]Відповідь:[/bold green]\n{result['generated_text']}")
+    else:
+        console.print("[bold green]Відповідь:[/bold green] ", end="")
+        for chunk in client.generate(prompt, model, stream=True,
+                                   temperature=temperature, max_tokens=max_tokens):
+            if "text" in chunk:
+                console.print(chunk["text"], end="")
+        console.print("\n")
 
 
 @cli.command()
-@click.option('--provider', '-p', default=None, help='Filter by provider')
 @click.pass_obj
-def models(client, provider):
-    """List available models"""
+def models(client: LLMClient):
+    """Показати список локальних моделей"""
+    data = client.list_models()
+    table = Table(title="Локальні моделі")
+    table.add_column("Назва", style="cyan")
+    table.add_column("Статус", style="green")
+    table.add_column("Розмір", style="yellow")
+
+    for model in data["models"]:
+        size = model["metadata"].get("size", "невідомо") if model["metadata"] else "невідомо"
+        table.add_row(model["name"], model["status"], size)
+
+    console.print(table)
+    console.print(f"[bold]Всього:[/bold] {data['total']} модел{'ь' if data['total'] != 1 else 'і'}")
+
+
+@cli.command()
+@click.argument('repo_id')
+@click.option('--filename', '-f', help='Конкретний GGUF файл (наприклад: model-q5_k.gguf)')
+@click.option('--type', 'model_type', type=click.Choice(['gguf', 'huggingface', 'gptq', 'awq', 'exl2']), default='gguf')
+@click.pass_obj
+def download(client: LLMClient, repo_id, filename, model_type):
+    """Завантажити модель з HuggingFace"""
+    if model_type == "gguf" and not filename:
+        # Спробуємо автоматично отримати список файлів
+        console.print("[yellow]Файл не вказано — отримуємо список GGUF...[/yellow]")
+        files = client.list_repo_files(repo_id).get("files", [])
+        gguf_files = [f for f in files if f.lower().endswith(".gguf")]
+        if not gguf_files:
+            console.print("[red]Не знайдено GGUF файлів у репозиторії[/red]")
+            raise click.Abort()
+        # Пропонуємо вибрати
+        console.print("Знайдено файли:")
+        for i, f in enumerate(gguf_files):
+            console.print(f"  {i+1}. {f}")
+        choice = click.prompt("Виберіть номер файлу", type=int)
+        filename = gguf_files[choice - 1]
+
+    console.print(f"[bold yellow]Завантаження {repo_id} → {filename or model_type}[/bold yellow]")
+
     with Progress(
         SpinnerColumn(),
         TextColumn("[progress.description]{task.description}"),
+        BarColumn(),
+        "[progress.percentage]{task.percentage:>3.0f}%",
+        TimeRemainingColumn(),
         console=console
     ) as progress:
-        task = progress.add_task("Fetching models...", total=None)
-        models_data = client.list_models(provider)
-        progress.remove_task(task)
-    
-    if provider:
-        table = Table(title=f"{provider.upper()} Models")
-        table.add_column("Model Name", style="cyan")
-        for model in models_data:
-            table.add_row(model)
-    else:
-        table = Table(title="Available Models")
-        table.add_column("Model Name", style="cyan")
-        table.add_column("Provider", style="magenta")
-        table.add_column("Type", style="green")
-        table.add_column("Status", style="yellow")
-        
-        for model in models_data['models']:
-            table.add_row(
-                model['name'],
-                model['provider'],
-                model['type'],
-                model['status']
-            )
-    
-    console.print(table)
+        task = progress.add_task("Завантаження...", total=100)
+
+        for event in client.download_model(repo_id, filename, model_type):
+            if event["status"] == "downloading":
+                progress.update(task, completed=event["progress"])
+            elif event["status"] == "complete":
+                progress.update(task, completed=100)
+                console.print(f"[bold green]Готово![/bold green] Модель завантажена: {event.get('model_path', '')}")
+            elif event["status"] == "error":
+                console.print(f"[bold red]Помилка:[/bold red] {event['message']}")
+                raise click.Abort()
 
 
 @cli.command()
+@click.argument('query', required=False)
+@click.option('--limit', '-l', default=15, help='Кількість результатів')
 @click.pass_obj
-def health(client):
-    """Check service health"""
-    with Progress(
-        SpinnerColumn(),
-        TextColumn("[progress.description]{task.description}"),
-        console=console
-    ) as progress:
-        task = progress.add_task("Checking health...", total=None)
-        health_data = client.health_check()
-        progress.remove_task(task)
-    
-    table = Table(title="Service Health")
-    table.add_column("Provider", style="cyan")
-    table.add_column("Status", style="bold")
-    
-    for provider, status in health_data['providers'].items():
-        status_text = "Available" if status else "Unavailable"
-        status_style = "green" if status else "red"
-        table.add_row(provider, f"[{status_style}]{status_text}[/{status_style}]")
-    
+def search(client: LLMClient, query, limit):
+    """Пошук моделей на HuggingFace (GGUF)"""
+    query = query or ""
+    results = client.search_models(query, limit)
+    table = Table(title=f"Результати пошуку: '{query}'")
+    table.add_column("Автор", style="cyan")
+    table.add_column("ID", style="green")
+    table.add_column("Завантаження", justify="right")
+    table.add_column("Лайки", justify="right")
+
+    for model in results.get("models", []):
+        author = model["id"].split("/")[0]
+        name = model["id"].split("/")[-1]
+        table.add_row(author, name, str(model.get("downloads", 0)), str(model.get("likes", 0)))
+
     console.print(table)
-    overall = "[green]Healthy[/green]" if health_data['status'] == "healthy" else "[yellow]Degraded[/yellow]"
-    console.print(f"\nOverall Status: {overall}")
 
 
-@cli.command()
-@click.argument('input_file', type=click.File('r'))
-@click.option('--output', '-o', type=click.File('w'), help='Output file')
-@click.option('--provider', '-p', default='ollama', help='LLM provider')
-@click.option('--model', '-m', default=None, help='Model name')
-@click.pass_obj
-def batch(client, input_file, output, provider, model):
-    """Process prompts from a file"""
-    prompts = [line.strip() for line in input_file if line.strip()]
-    results = []
-    
-    with Progress(console=console) as progress:
-        task = progress.add_task("[cyan]Processing prompts...", total=len(prompts))
-        
-        for prompt in prompts:
-            result = client.generate(prompt=prompt, provider=provider, model=model)
-            results.append({"prompt": prompt, "response": result['generated_text']})
-            progress.update(task, advance=1)
-    
-    if output:
-        json.dump(results, output, indent=2, ensure_ascii=False)
-        console.print(f"\n[green]Results saved to {output.name}[/green]")
-    else:
-        for i, result in enumerate(results, 1):
-            console.print(f"\n[bold cyan]Prompt {i}:[/bold cyan] {result['prompt']}")
-            console.print(f"[bold green]Response:[/bold green] {result['response']}\n")
-
-
-# === НОВА КОМАНДА: Завантаження моделі з Hugging Face ===
 @cli.command()
 @click.argument('model_name')
-@click.option('--provider', '-p', default='huggingface', help='Provider (huggingface only for now)')
 @click.pass_obj
-def pull(client, model_name, provider):
-    """Download a model from Hugging Face Hub
-    
-    Example:
-        llm pull microsoft/DialoGPT-medium
-        llm pull gpt2
-        llm pull google/flan-t5-base --provider huggingface
-    """
-    if provider != "huggingface":
-        console.print(f"[red]Pull command currently supports only 'huggingface' provider[/red]")
-        raise click.Abort()
-    
-    console.print(f"[bold yellow]Starting download of {model_name} from Hugging Face...[/bold yellow]")
-    try:
-        client.pull_model(model_name, provider)
-    except requests.exceptions.HTTPError as e:
-        if e.response.status_code == 404:
-            console.print(f"[bold red]Model '{model_name}' not found or endpoint not available[/bold red]")
-        else:
-            console.print(f"[bold red]HTTP Error: {e.response.status_code} - {e.response.text}[/bold red]")
-    except Exception as e:
-        console.print(f"[bold red]Failed to download model: {e}[/bold red]")
+def info(client: LLMClient, model_name):
+    """Інформація про локальну модель"""
+    data = client.model_info(model_name)
+    info = data["model"]
+    panel = Panel(
+        Syntax(json.dumps(info, indent=2, ensure_ascii=False), "json", theme="monokai", line_numbers=True),
+        title=f"Модель: [bold cyan]{model_name}[/bold cyan]",
+        border_style="bright_blue"
+    )
+    console.print(panel)
+
+
+@cli.command()
+@click.argument('model_name')
+@click.pass_obj
+def delete(client: LLMClient, model_name):
+    """Видалити локальну модель"""
+    if not click.confirm(f"Видалити модель '{model_name}'?"):
+        console.print("Скасовано.")
+        return
+    result = client.delete_model(model_name)
+    console.print(f"[bold green]Успішно видалено:[/bold green] {model_name}")
+
+
+@cli.command()
+@click.pass_obj
+def health(client: LLMClient):
+    """Перевірка стану сервісу"""
+    data = client.health()
+    status = "Здоровий" if data["status"] == "healthy" else "Проблеми"
+    color = "green" if data["status"] == "healthy" else "red"
+    console.print(f"Статус: [{color}]{status}[/{color}]")
+    console.print(f"Версія: {data['version']}")
 
 
 if __name__ == '__main__':

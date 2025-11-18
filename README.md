@@ -34,57 +34,389 @@ A production-ready FastAPI service for working with multiple Large Language Mode
 
 ## 📁 Project Structure
 
+# 📁 Project Structure
+
+Complete directory structure of Local LLM Service.
+
+```
+llm-service/
+│
+├── 📄 README.md                    # Project overview
+├── 📄 QUICKSTART.md                # Quick start guide
+├── 📄 INSTALLATION.md              # Detailed installation
+├── 📄 EXAMPLES.md                  # Usage examples
+├── 📄 CHANGES_SUMMARY.md           # Summary of changes
+├── 📄 LICENSE                      # License file
+│
+├── ⚙️ Configuration Files
+│   ├── .env.example                # Configuration template
+│   ├── .env                        # Your config (git-ignored)
+│   ├── .gitignore                  # Git ignore rules
+│   ├── requirements.txt            # Python dependencies
+│   ├── Dockerfile                  # Docker image definition
+│   └── docker-compose.yml          # Docker Compose config
+│
+├── 🐍 CLI Tool
+│   └── cli.py                      # Command-line interface
+│
+├── 📦 Application (app/)
+│   │
+│   ├── main.py                     # FastAPI application entry
+│   ├── config.py                   # Configuration management
+│   │
+│   ├── 🎯 Core (app/core/)
+│   │   │
+│   │   ├── providers/              # LLM providers
+│   │   │   ├── __init__.py         # Provider manager
+│   │   │   ├── base.py             # Base provider interface
+│   │   │   └── local_unified_provider.py  # Local models provider
+│   │   │
+│   │   ├── model_downloader.py     # Model download manager
+│   │   └── exceptions.py           # Custom exceptions
+│   │
+│   ├── 🌐 API Routes (app/api/)
+│   │   └── routes/
+│   │       ├── generation.py       # Text generation endpoints
+│   │       ├── models.py           # Model management endpoints
+│   │       └── training.py         # Training endpoints (future)
+│   │
+│   └── 📋 Schemas (app/schemas/)
+│       ├── generation.py           # Generation request/response
+│       └── models.py               # Model schemas
+│
+├── 📂 Data Directories (git-ignored)
+│   │
+│   ├── models/                     # Local models storage
+│   │   ├── .gitkeep
+│   │   ├── cache/                  # HuggingFace cache
+│   │   └── fine-tuned/             # Fine-tuned models
+│   │
+│   ├── data/                       # Application data
+│   │   └── .gitkeep
+│   │
+│   └── logs/                       # Application logs
+│       ├── .gitkeep
+│       └── llm_service.log
+│
+├── 📚 Documentation (docs/)
+│   ├── api/                        # API documentation
+│   ├── guides/                     # User guides
+│   └── architecture.md             # Architecture overview
+│
+├── 🧪 Tests (tests/)
+│   ├── __init__.py
+│   ├── test_providers.py
+│   ├── test_api.py
+│   └── test_downloader.py
+│
+└── 📝 Examples (examples/)
+    ├── python/
+    │   ├── basic_generation.py
+    │   ├── streaming.py
+    │   └── chatbot.py
+    ├── javascript/
+    │   └── client.js
+    └── curl/
+        └── examples.sh
+```
+
+---
+
+## 📄 Key Files Description
+
+### Root Files
+
+| File | Purpose |
+|------|---------|
+| `README.md` | Project overview, features, quick links |
+| `QUICKSTART.md` | Get started in 5 minutes |
+| `INSTALLATION.md` | Detailed installation instructions |
+| `EXAMPLES.md` | Code examples in multiple languages |
+| `CHANGES_SUMMARY.md` | Summary of architectural changes |
+| `cli.py` | Command-line interface tool |
+
+### Configuration
+
+| File | Purpose |
+|------|---------|
+| `.env.example` | Configuration template with comments |
+| `.env` | Your actual configuration (git-ignored) |
+| `requirements.txt` | Python package dependencies |
+| `Dockerfile` | Docker image for CPU/GPU |
+| `docker-compose.yml` | Docker orchestration |
+| `.gitignore` | Files to ignore in git |
+
+### Application Core (`app/`)
+
+| File/Directory | Purpose |
+|----------------|---------|
+| `main.py` | FastAPI application, startup/shutdown |
+| `config.py` | Pydantic settings management |
+| `core/providers/` | LLM provider implementations |
+| `core/model_downloader.py` | HuggingFace integration |
+| `core/exceptions.py` | Custom error handling |
+| `api/routes/` | REST API endpoints |
+| `schemas/` | Pydantic models for validation |
+
+### Provider System
+
+| File | Purpose |
+|------|---------|
+| `base.py` | Abstract provider interface |
+| `local_unified_provider.py` | Universal local model handler |
+| `__init__.py` | Provider manager, orchestration |
+
+### API Endpoints (`app/api/routes/`)
+
+| File | Endpoints |
+|------|-----------|
+| `generation.py` | `/api/v1/generation/*` |
+| `models.py` | `/api/v1/models/*` |
+| `training.py` | `/api/v1/training/*` (future) |
+
+---
+
+## 🗂️ Data Directories
+
+### `models/` Structure
+
+```
+models/
+├── .gitkeep                        # Keep directory in git
+├── cache/                          # HuggingFace cache
+│   └── models--TheBloke--Llama-2-7B-GGUF/
+│       └── snapshots/
+│           └── <hash>/
+│               └── llama-2-7b.Q4_K_M.gguf
+├── llama-2-7b.Q4_K_M.gguf         # GGUF model
+├── mistral-7b.Q4_K_M.gguf         # Another GGUF
+├── phi-2/                          # HuggingFace model
+│   ├── config.json
+│   ├── model.safetensors
+│   └── tokenizer.json
+└── fine-tuned/                     # Fine-tuned models
+    └── my-model/
+```
+
+### `data/` Structure
+
+```
+data/
+├── .gitkeep
+├── conversations/                  # Saved conversations
+├── datasets/                       # Training datasets
+└── checkpoints/                    # Training checkpoints
+```
+
+### `logs/` Structure
+
+```
+logs/
+├── .gitkeep
+├── llm_service.log                # Main application log
+├── downloads.log                  # Model downloads
+└── errors.log                     # Error logs
+```
+
+---
+
+## 🔌 API Endpoints Overview
+
+### Models Management
+
+```
+GET    /api/v1/models/list
+POST   /api/v1/models/download
+POST   /api/v1/models/search
+GET    /api/v1/models/files/{repo_id}
+GET    /api/v1/models/info/{model}
+DELETE /api/v1/models/delete
+GET    /api/v1/models/health
+```
+
+### Text Generation
+
+```
+POST   /api/v1/generation/generate
+POST   /api/v1/generation/stream
+```
+
+### System
+
+```
+GET    /
+GET    /health
+GET    /info
+GET    /docs          # Swagger UI
+GET    /redoc         # ReDoc
+```
+
+---
+
+## 🧩 Module Dependencies
+
+```
+main.py
+├── config.py (Settings)
+├── core/
+│   ├── providers/
+│   │   ├── __init__.py (ProviderManager)
+│   │   │   └── local_unified_provider.py
+│   │   └── base.py
+│   ├── model_downloader.py
+│   └── exceptions.py
+└── api/routes/
+    ├── generation.py
+    └── models.py
+
+cli.py
+└── requests (HTTP client)
+    └── API endpoints
+```
+
+---
+
+## 📦 Package Layout
+
+```python
+# Import examples:
+
+# From application
+from app.config import settings
+from app.core.providers import ProviderManager
+from app.core.model_downloader import ModelDownloader
+
+# From schemas
+from app.schemas.generation import GenerationRequest, GenerationResponse
+from app.schemas.models import ModelInfo
+
+# From routes
+from app.api.routes import generation, models
+```
+
+---
+
+## 🔧 Environment Variables Structure
+
+```bash
+# Application
+APP_NAME=...
+VERSION=...
+ENVIRONMENT=...
+HOST=...
+PORT=...
+LOG_LEVEL=...
+
+# Directories
+MODELS_DIR=...
+DATA_DIR=...
+CACHE_DIR=...
+
+# Provider
+USE_GPU=...
+GPU_LAYERS=...
+CONTEXT_SIZE=...
+BATCH_SIZE=...
+N_THREADS=...
+
+# Generation
+MAX_TOKENS=...
+DEFAULT_TEMPERATURE=...
+DEFAULT_TOP_P=...
+
+# Downloads
+HUGGINGFACE_TOKEN=...
+DOWNLOAD_TIMEOUT=...
+
+# Security
+API_KEY_ENABLED=...
+API_KEYS=...
+```
+
+---
+
+## 📊 File Size Guidelines
+
+| Directory/File | Typical Size |
+|----------------|--------------|
+| Application code | < 100 KB |
+| Virtual environment | ~500 MB |
+| GGUF model (Q4_K_M 7B) | ~4 GB |
+| GGUF model (Q4_K_M 13B) | ~8 GB |
+| HuggingFace model (7B) | ~15 GB |
+| Cache (per model) | Variable |
+| Logs | < 100 MB |
+
+---
+
+## 🗃️ Git Repository
+
+**Tracked:**
+- Source code (`app/`, `cli.py`)
+- Documentation (`*.md`)
+- Configuration templates (`.env.example`)
+- Docker files
+- Tests
+- Requirements
+
+**Ignored (`.gitignore`):**
+- Models (`models/`)
+- Data (`data/`)
+- Logs (`logs/`)
+- Virtual environment (`venv/`)
+- Configuration (`.env`)
+- Cache files
+- Python bytecode (`__pycache__/`)
+
+---
+
+## 🚀 Deployment Structure
+
+### Development
 ```
 llm-service/
 ├── app/
-│   ├── __init__.py
-│   ├── main.py                 # FastAPI application entry point
-│   ├── config.py               # Pydantic configuration settings
-│   │
-│   ├── api/
-│   │   ├── __init__.py
-│   │   └── routes/
-│   │       ├── __init__.py
-│   │       ├── generation.py   # Text generation endpoints
-│   │       ├── models.py       # Model management endpoints
-│   │       └── training.py     # Training endpoints
-│   │
-│   ├── core/
-│   │   ├── __init__.py
-│   │   ├── exceptions.py       # Custom exceptions
-│   │   ├── training.py         # Training manager
-│   │   └── providers/
-│   │       ├── __init__.py     # Provider manager
-│   │       ├── base.py         # Base provider interface
-│   │       ├── ollama_provider.py
-│   │       ├── huggingface_provider.py
-│   │       └── openai_provider.py
-│   │
-│   └── schemas/
-│       ├── __init__.py
-│       ├── generation.py       # Generation schemas
-│       ├── models.py           # Model schemas
-│       └── training.py         # Training schemas
-│
-├── data/                       # Data storage
-├── models/                     # Model storage
-│   ├── huggingface/           # HuggingFace cache
-│   └── fine-tuned/            # Fine-tuned models
-│
-├── tests/                      # Test files
-│   ├── __init__.py
-│   ├── test_generation.py
-│   ├── test_models.py
-│   └── test_training.py
-│
-├── Dockerfile                  # Docker configuration
-├── docker-compose.yml         # Docker Compose configuration
-├── requirements.txt           # Python dependencies
-├── .env.example               # Environment variables example
-├── .dockerignore
-├── .gitignore
-└── README.md
+├── models/
+├── .env (development)
+└── venv/
 ```
+
+### Production (Docker)
+```
+container:
+├── /app/
+│   ├── app/
+│   └── main.py
+├── /app/models/ (volume mount)
+├── /app/data/ (volume mount)
+└── /app/logs/ (volume mount)
+```
+
+### Production (Bare Metal)
+```
+/opt/llm-service/
+├── app/
+├── venv/
+├── models/
+├── data/
+├── logs/
+└── .env (production)
+```
+
+---
+
+## 📝 Notes
+
+1. **Models Directory**: Should be on fast SSD for best performance
+2. **Logs Directory**: Monitor disk space, implement rotation
+3. **Cache Directory**: Can be cleared if disk space needed
+4. **Virtual Environment**: Keep separate for each deployment
+5. **Configuration**: Never commit `.env` to git
+
+---
+
+**Last Updated:** 2025  
+**Version:** 2.0.0
 
 ## 🛠️ Installation
 
