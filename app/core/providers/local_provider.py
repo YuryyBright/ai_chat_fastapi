@@ -1,157 +1,115 @@
-# app/core/providers/local_universal_provider.py
+# app/core/providers/local_provider.py
 """
-Універсальний локальний провайдер (працює з 95% всіх локальних бекендів 2025 року)
-Підтримує:
-- llama.cpp server (GGUF + всі кванти)
-- tabbyAPI (EXL2 — найшвидше на NVIDIA)
-- vLLM
-- oobabooga text-generation-webui
-- LM Studio
-- KoboldCPP
-- AnythingLLM
-- Всі, хто має OpenAI-сумісний API
+ПОВНІСТЮ ОФЛАЙН локальний провайдер
+Автоматично знаходить моделі в ./models:
+- .gguf / .bin файли
+- HuggingFace папки (з config.json тощо)
+- EXL2 / GPTQ / AWQ (папки з .safetensors + config)
+Працює через llama.cpp — найуніверсальнініше рішення 2025 року
 """
-
-import time
-import httpx
-from typing import AsyncGenerator, List, Dict, Any
-from app.core.providers.base import BaseLLMProvider
+import os
+from pathlib import Path
+from typing import List, AsyncGenerator, Dict, Any
 from app.schemas.generation import GenerationRequest, GenerationResponse
-from app.core.exceptions import ProviderError
+from app.core.providers.base import BaseLLMProvider
+from app.config import settings
 import logging
 
 logger = logging.getLogger(__name__)
 
-
 class LocalProvider(BaseLLMProvider):
-    """
-    Універсальний провайдер для будь-якого локального OpenAI-сумісного серверу
-    """
-    
     def __init__(self, config: Dict[str, Any]):
         super().__init__(config)
-        self.base_url = config.get("base_url", "http://127.0.0.1:8080/v1")  # зазвичай так
-        self.api_key = config.get("api_key", "not-needed")
-        self.timeout = config.get("timeout", 600)
-        self.client = None
-        self.model_list_cache = None
+        self.models_dir = Path(settings.models_dir or "./models")
+        self.loaded_models = {}  # кеш: model_name -> Llama instance
 
     async def initialize(self) -> None:
-        self.client = httpx.AsyncClient(
-            base_url=self.base_url,
-            timeout=self.timeout,
-            headers={"Authorization": f"Bearer {self.api_key}"}
-        )
-        logger.info(f"LocalUniversalProvider ініціалізовано: {self.base_url}")
+        self.models_dir.mkdir(parents=True, exist_ok=True)
+        logger.info(f"LocalProvider запущено. Шукаю моделі в: {self.models_dir}")
 
     async def is_available(self) -> bool:
-        try:
-            resp = await self.client.get("/health")
-            return resp.status_code in (200, 404)  # 404 теж ок — деякі сервери не мають /health
-        except:
-            try:
-                await self.client.get("/v1/models")
-                return True
-            except:
-                return False
+        return True  # завжди доступний — офлайн
 
     async def list_models(self) -> List[str]:
-        if self.model_list_cache:
-            return self.model_list_cache
-        
+        if not self.models_dir.exists():
+            return []
+
+        models = set()
+
+        for path in self.models_dir.iterdir():
+            if path.is_file() and path.suffix.lower() in {".gguf", ".bin", ".gptq", ".awq"}:
+                models.add(path.stem)
+
+            elif path.is_dir():
+                # HuggingFace формат
+                if any((path / f).exists() for f in ["config.json", "generation_config.json"]):
+                    models.add(path.name)
+                # EXL2, GPTQ, AWQ — шукаємо safetensors + config
+                elif any(f.suffix == ".safetensors" for f in path.rglob("*.safetensors")):
+                    if (path / "config.json").exists() or (path / "quantize_config.json").exists():
+                        models.add(path.name)
+
+        models_list = sorted(models)
+        logger.info(f"Знайдено локальних моделей: {len(models_list)} → {models_list or 'немає'}")
+        return models_list
+
+    def _get_llama(self, model_name: str):
+        if model_name in self.loaded_models:
+            return self.loaded_models[model_name]
+
+        model_path = self._resolve_path(model_name)
+        if not model_path:
+            raise ValueError(f"Модель '{model_name}' не знайдена в {self.models_dir}")
+
         try:
-            resp = await self.client.get("/v1/models")
-            if resp.status_code == 200:
-                data = resp.json()
-                models = [m["id"] for m in data.get("data", [])]
-                self.model_list_cache = models
-                return models
+            from llama_cpp import Llama
+
+            logger.info(f"Завантажую модель: {model_path}")
+            llm = Llama(
+                model_path=str(model_path),
+                n_ctx=8192,
+                n_batch=512,
+                n_threads=max(1, os.cpu_count() - 1),
+                n_gpu_layers=999 if os.getenv("USE_GPU", "0") == "1" else 0,
+                verbose=False,
+            )
+            self.loaded_models[model_name] = llm
+            return llm
         except Exception as e:
-            logger.warning(f"Не вдалося отримати список моделей: {e}")
-        
-        return ["unknown-local-model"]
+            logger.error(f"Не вдалося завантажити {model_path}: {e}")
+            raise
+
+    def _resolve_path(self, model_name: str) -> Path | None:
+        candidates = [
+            self.models_dir / f"{model_name}.gguf",
+            self.models_dir / f"{model_name}.bin",
+            self.models_dir / model_name,  # папка HF / EXL2
+        ]
+        for p in candidates:
+            if p.exists():
+                return p
+        return None
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
-        start_time = time.time()
-        model = request.model or "default"
-
-        messages = []
-        if request.system_message:
-            messages.append({"role": "system", "content": request.system_message})
-        if request.context:
-            messages.extend(request.context)
-        messages.append({"role": "user", "content": request.prompt})
-
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": request.max_tokens or 1024,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "stream": False
-        }
-
-        try:
-            resp = await self.client.post("/v1/chat/completions", json=payload)
-            if resp.status_code != 200:
-                error = resp.text
-                raise ProviderError(f"Local server error {resp.status_code}: {error}")
-
-            data = resp.json()
-            choice = data["choices"][0]
-            generation_time = time.time() - start_time
-
-            return GenerationResponse(
-                generated_text=choice["message"]["content"],
-                model=model,
-                provider="local_universal",
-                tokens_used=data.get("usage", {}).get("total_tokens"),
-                finish_reason=choice.get("finish_reason"),
-                generation_time=generation_time,
-                metadata=data
-            )
-
-        except Exception as e:
-            logger.error(f"LocalUniversal generate error: {e}")
-            raise ProviderError(f"Локальний сервер не відповів: {str(e)}")
+        result = ""
+        async for token in self.generate_stream(request):
+            result += token
+        return GenerationResponse(generated_text=result)
 
     async def generate_stream(self, request: GenerationRequest) -> AsyncGenerator[str, None]:
-        model = request.model or "default"
+        model_name = request.model or next(iter(await self.list_models()), "unknown")
+        llm = self._get_llama(model_name)
 
-        messages = []
-        if request.system_message:
-            messages.append({"role": "system", "content": request.system_message})
-        if request.context:
-            messages.extend(request.context)
-        messages.append({"role": "user", "content": request.prompt})
+        stream = llm(
+            prompt=request.prompt,
+            max_tokens=request.max_tokens or 1024,
+            temperature=request.temperature or 0.7,
+            top_p=request.top_p or 0.95,
+            stop=request.stop_sequences,
+            stream=True,
+        )
 
-        payload = {
-            "model": model,
-            "messages": messages,
-            "max_tokens": request.max_tokens or 1024,
-            "temperature": request.temperature,
-            "top_p": request.top_p,
-            "stream": True
-        }
-
-        try:
-            async with self.client.stream("POST", "/v1/chat/completions", json=payload) as response:
-                async for line in response.atext():
-                    if line.startswith("data: "):
-                        chunk = line[6:]
-                        if chunk.strip() == "[DONE]":
-                            break
-                        try:
-                            data = httpx._models.Response.json({"content": chunk})
-                            delta = data["choices"][0]["delta"].get("content")
-                            if delta:
-                                yield delta
-                        except:
-                            continue
-        except Exception as e:
-            logger.error(f"Streaming error: {e}")
-            raise ProviderError(f"Помилка стримінгу: {e}")
-
-    async def cleanup(self) -> None:
-        if self.client:
-            await self.client.aclose()
+        for chunk in stream:
+            text = chunk["choices"][0]["delta"].get("content", "")
+            if text:
+                yield text
