@@ -6,7 +6,8 @@ from app.schemas.generation import GenerationRequest, GenerationResponse
 from app.core.providers.base import BaseLLMProvider
 from app.config import settings
 import logging
-
+import time
+from datetime import datetime
 logger = logging.getLogger(__name__)
 
 class LocalProvider(BaseLLMProvider):
@@ -87,11 +88,23 @@ class LocalProvider(BaseLLMProvider):
             raise
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
-        """Не-потокова генерація"""
+        start_time = time.time()
         result = ""
+
         async for token in self.generate_stream(request):
             result += token
-        return GenerationResponse(generated_text=result.strip())
+
+        generation_time = time.time() - start_time
+
+        available_models = await self.list_models()
+        model_name = request.model or (available_models[0] if available_models else "unknown")
+
+        return GenerationResponse(
+            generated_text=result.strip(),
+            model=model_name,
+            provider="local",
+            generation_time=round(generation_time, 3),
+        )
 
     async def generate_stream(self, request: GenerationRequest) -> AsyncGenerator[str, None]:
         """Потокова генерація з правильними параметрами"""
