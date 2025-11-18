@@ -61,23 +61,31 @@ class LocalProvider(BaseLLMProvider):
         try:
             from llama_cpp import Llama
 
-            n_gpu_layers = -1 if os.getenv("USE_GPU", "0") == "1" else 0
+            n_gpu_layers = self.config.get("gpu_layers", -1)
             if n_gpu_layers == -1:
-                n_gpu_layers = 999  # всі шари на GPU
+                n_gpu_layers = 999  # усі шари на GPU
 
             llm = Llama(
                 model_path=str(model_path),
                 n_ctx=settings.context_size or 8192,
-                n_batch=settings.batch_size or 512,
+                n_batch=512,
                 n_threads=settings.n_threads or max(1, os.cpu_count() - 1),
-                n_gpu_layers=self.config.get("gpu_layers", -1),  # -1 = всі
+                n_gpu_layers=n_gpu_layers,
                 verbose=False,
-                logits_all=True,
-                use_mlock=True,        # рекомендується
-                use_mmap=True,         # рекомендується
+                logits_all=False,           # ВИМКНЕНО — критично для швидкості!
+                use_mlock=True,
+                use_mmap=True,
+                cache_prompt=True,          # прискорює повторні запити
+
+                # Розумні дефолти (не залежать від запиту)
+                repeat_penalty=1.1,         # найкраще працює
+                top_k=40,
+                top_p=0.95,
+                temperature=0.7,
+                last_n_tokens=64,
             )
             self.loaded_models[model_name] = llm
-            logger.info(f"Успішно завантажено модель: {model_name} ← {model_path}")
+            logger.info(f"Завантажено модель: {model_name} ← {model_path.name}")
             return llm
         except Exception as e:
             logger.error(f"Помилка завантаження моделі {model_name}: {e}")
@@ -98,38 +106,34 @@ class LocalProvider(BaseLLMProvider):
 
         llm = self._get_llama(model_name)
 
-        stream = llm.create_completion(
-            prompt=request.prompt,
-            max_tokens=request.max_tokens or 1024,
-            temperature=request.temperature or 0.7,
-            top_p=request.top_p or 0.95,
-            stop=request.stop_sequences or [],
-            stream=True,
-        )
+        # Використовуємо лише ті параметри, які є в твоїй схемі
+        completion_kwargs = {
+            "prompt": request.prompt,
+            "max_tokens": request.max_tokens or 1024,
+            "temperature": request.temperature or 0.7,
+            "top_p": request.top_p or 0.9,
+            "top_k": request.top_k or 40,
+            "stop": request.stop_sequences,
+            "stream": True,
+            # "cache_prompt": True,        # дуже важливо для швидкості
+            "echo": False,
+        }
 
-        for chunk in stream:
-            try:
-                choice = chunk["choices"][0]
-                
-                # Спроба 1: новий формат llama-cpp-python (>=0.2.85)
-                text = choice.get("text")
-                
-                # Спроба 2: старий формат з delta
-                if not text:
-                    delta = choice.get("delta") or {}
-                    text = delta.get("content") or delta.get("text")
-                
-                # Спроба 3: іноді буває прямо в chunk
-                if not text:
-                    text = chunk.get("text")
-                
-                if text and text.strip():
-                    yield text
-                    
-            except Exception as e:
-                logger.debug(f"Пропущено чанк через помилку парсингу: {e} | chunk: {chunk}")
-                continue
+        try:
+            stream = llm.create_completion(**completion_kwargs)
 
+            for chunk in stream:
+                try:
+                    delta = chunk["choices"][0].get("delta", {})
+                    text = delta.get("content") or delta.get("text") or ""
+                    if text:
+                        yield text
+                except (KeyError, IndexError, TypeError):
+                    continue  # пропускаємо биті чанки
+
+        except Exception as e:
+            logger.error(f"Помилка в generate_stream: {e}", exc_info=True)
+            raise
     def get_model_info(self, model_name: str) -> Optional[Dict[str, Any]]:
         """
         Повертає метадані моделі (використовується в /info та /list)
