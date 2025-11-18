@@ -43,7 +43,7 @@ async def list_all_models(request: Request) -> ModelListResponse:
     manager = request.app.state.provider_manager
     provider = manager.get_provider("local_provider")
     
-    model_names = await provider.list_models()
+    model_names = await provider.list_models() or []
     
     models_list = []
     for model_name in model_names:

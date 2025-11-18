@@ -1,95 +1,115 @@
+
 # app/api/routes/generation.py
 """
-API routes for text generation
+API роути для генерації тексту
+Повністю сумісний з LocalProvider + SSE streaming
 """
 
-from fastapi import APIRouter, Request, HTTPException
+from fastapi import APIRouter, Request, HTTPException, Depends
 from fastapi.responses import StreamingResponse
-from app.schemas.generation import GenerationRequest, GenerationResponse
-from app.core.providers import ProviderManager
+from pydantic import BaseModel
+from typing import AsyncGenerator
 import json
 import logging
+
+from app.schemas.generation import GenerationRequest, GenerationResponse
+from app.core.providers import ProviderManager
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
 
 
 def get_provider_manager(request: Request) -> ProviderManager:
-    """Dependency to get provider manager from app state"""
+    """Залежність: отримуємо менеджер провайдерів з app.state"""
+    if not hasattr(request.app.state, "provider_manager"):
+        raise HTTPException(status_code=503, detail="Provider manager not initialized")
     return request.app.state.provider_manager
 
 
-@router.post("/generate", response_model=GenerationResponse)
+class StreamChunk(BaseModel):
+    text: str = ""
+    done: bool = False
+    error: str | None = None
+
+
+@router.post("", response_model=GenerationResponse)
+@router.post("/", response_model=GenerationResponse)
 async def generate_text(
     request: GenerationRequest,
-    app_request: Request
+    manager: ProviderManager = Depends(get_provider_manager),
 ) -> GenerationResponse:
     """
-    Generate text using specified provider and model
-    
-    - **prompt**: Input text prompt
-    - **provider**: LLM provider (ollama, huggingface, openai)
-    - **model**: Model name (optional, uses default if not specified)
-    - **stream**: Enable streaming (use /generate/stream endpoint instead)
+    Звичайна (не потокова) генерація тексту
     """
     if request.stream:
         raise HTTPException(
             status_code=400,
-            detail="For streaming generation, use the /generate/stream endpoint"
+            detail="Для потокової генерації використовуйте POST /generate/stream"
         )
-    
-    manager = get_provider_manager(app_request)
-    provider = manager.get_provider(request.provider)
-    
+
+    # У тебе тільки local_provider → завжди використовуємо його
+    provider = manager.get_provider("local_provider")
+
     logger.info(
-        f"Generation request: provider={request.provider}, "
-        f"model={request.model}, prompt_length={len(request.prompt)}"
+        f"Генерація: model={request.model or 'авто'}, "
+        f"prompt_len={len(request.prompt)}, temp={request.temperature}"
     )
-    
-    response = await provider.generate(request)
-    return response
+
+    try:
+        response = await provider.generate(request)
+        return response
+    except Exception as e:
+        logger.error(f"Помилка генерації: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
 
 
-@router.post("/generate/stream")
+@router.post("/stream")
 async def generate_text_stream(
     request: GenerationRequest,
-    app_request: Request
+    manager: ProviderManager = Depends(get_provider_manager),
 ):
     """
-    Generate text with streaming output
-    
-    Returns Server-Sent Events (SSE) stream of generated text chunks
+    Потокова генерація через Server-Sent Events (SSE)
+    Формат чанку:
+    data: {"text": "Привіт", "done": false}
+    data: {"text": "", "done": true}
     """
-    manager = get_provider_manager(app_request)
-    provider = manager.get_provider(request.provider)
-    
+    provider = manager.get_provider("local_provider")
+
     logger.info(
-        f"Streaming generation request: provider={request.provider}, "
-        f"model={request.model}"
+        f"Потокова генерація: model={request.model or 'авто'}, "
+        f"prompt_len={len(request.prompt)}"
     )
-    
-    async def event_generator():
-        """Generate SSE events"""
+
+    async def event_generator() -> AsyncGenerator[str, None]:
         try:
-            async for chunk in provider.generate_stream(request):
-                # Format as SSE
-                data = json.dumps({"text": chunk, "done": False})
-                yield f"data: {data}\n\n"
-            
-            # Send completion event
-            data = json.dumps({"text": "", "done": True})
-            yield f"data: {data}\n\n"
-        
+            logger.info(f"Starting generate stream")
+            async for token in provider.generate_stream(request):
+                logger.info("Генеруємо токен: {token}")
+                if token.strip():  # відправляємо тільки непорожні токени
+                    chunk = StreamChunk(text=token, done=False)
+                    logger.info(f"Chunk: {chunk}")
+                    yield f"data: {chunk.model_dump_json()}\n\n"
+
+            # Кінець генерації
+            final = StreamChunk(text="", done=True)
+            yield f"data: {final.model_dump_json()}\n\n"
+
         except Exception as e:
-            logger.error(f"Streaming error: {e}")
-            error_data = json.dumps({"error": str(e), "done": True})
-            yield f"data: {error_data}\n\n"
-    
+            logger.error(f"Помилка в потоковій генерації: {e}", exc_info=True)
+            error_chunk = StreamChunk(text="", done=True, error=str(e))
+            yield f"data: {error_chunk.model_dump_json()}\n\n"
+
+        # Додатковий порожній рядок — допомагає клієнтам
+        yield "\n"
+
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
             "Connection": "keep-alive",
-        }
+            "X-Accel-Buffering": "no",  # важливо для Nginx
+            "Access-Control-Allow-Origin": "*",
+        },
     )

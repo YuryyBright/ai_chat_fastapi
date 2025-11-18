@@ -53,6 +53,7 @@ htmlcov/
 .env.*.local
 
 # Models and Data
+models/
 models/huggingface/*
 !models/huggingface/.gitkeep
 models/fine-tuned/*

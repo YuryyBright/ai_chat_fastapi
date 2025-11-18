@@ -31,7 +31,7 @@ class ProviderManager:
         logger.info("Ініціалізація локального провайдера...")
         
         # Створюємо єдиний локальний провайдер
-        self.providers["local_unified"] = LocalProvider({
+        self.providers["local_provider"] = LocalProvider({
             "models_dir": settings.models_dir or "./models",
             "context_size": settings.context_size or 8192,
             "batch_size": settings.batch_size or 512,
