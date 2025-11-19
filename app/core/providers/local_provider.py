@@ -29,16 +29,32 @@ class LocalProvider(BaseLLMProvider):
             return []
 
         models = set()
-        for path in self.models_dir.iterdir():
-            if path.is_file() and path.suffix.lower() in {".gguf", ".bin"}:
-                models.add(path.stem)
-            elif path.is_dir():
-                if (path / "config.json").exists() or any(f.suffix == ".safetensors" for f in path.glob("*.safetensors")):
-                    models.add(path.name)
 
-        models_list = sorted(models)
-        logger.info(f"Знайдено локальних моделей: {len(models_list)}")
-        return models_list
+        # Шукаємо ВСІ .gguf, .bin, .pt файли рекурсивно
+        for ext in ("*.gguf", "*.bin", "*.pt"):
+            for file in self.models_dir.rglob(ext):
+                if file.is_file():
+                    # Назва моделі = шлях відносно models_dir без розширення
+                    rel_path = file.relative_to(self.models_dir).parent / file.stem
+                    model_name = str(rel_path).replace("\\", "/")
+                    if model_name.startswith("./"):
+                        model_name = model_name[2:]
+                    if model_name.endswith("/"):  # якщо папка
+                        model_name = model_name[:-1]
+                    models.add(model_name)
+
+        # Додаємо HF-папки (навіть без файлів — якщо є config.json)
+        for dirpath in self.models_dir.rglob("*"):
+            if dirpath.is_dir():
+                if (dirpath / "config.json").exists() or any(
+                    f.suffix in {".safetensors", ".bin", ".pt"} for f in dirpath.iterdir()
+                ):
+                    rel = dirpath.relative_to(self.models_dir)
+                    models.add(str(rel).replace("\\", "/"))
+
+        result = sorted(models)
+        logger.info(f"Знайдено {len(result)} локальних моделей: {result}")
+        return result
 
     def _resolve_path(self, model_name: str) -> Optional[Path]:
         candidates = [
@@ -52,44 +68,96 @@ class LocalProvider(BaseLLMProvider):
         return None
 
     def _get_llama(self, model_name: str):
-        """Завантаження моделі з правильними параметрами"""
         if model_name in self.loaded_models:
             return self.loaded_models[model_name]
 
         model_path = self._resolve_path(model_name)
         if not model_path:
-            raise ValueError(f"Модель '{model_name}' не знайдена в {self.models_dir}")
+            raise ValueError(f"Модель '{model_name}' не знайдена")
+
+        from llama_cpp import Llama
+
+        n_gpu_layers = self.config.get("gpu_layers", -1)
+        if n_gpu_layers == -1:
+            n_gpu_layers = 999
+
+        llm = Llama(
+            model_path=str(model_path),
+            n_ctx=settings.context_size or 8192,
+            n_batch=512,
+            n_threads=settings.n_threads or max(1, os.cpu_count() - 1),
+            n_gpu_layers=n_gpu_layers,
+            verbose=False,
+            logits_all=False,
+            use_mlock=True,
+            use_mmap=True,
+            # Ключ до стабільності Instruct-модель
+            chat_format="llama-3" if "llama-3" in model_name.lower() else None,
+        )
+
+        self.loaded_models[model_name] = llm
+        logger.info(f"Завантажено модель: {model_name}")
+        return llm
+
+    async def generate_stream(self, request: GenerationRequest) -> AsyncGenerator[str, None]:
+        available_models = await self.list_models()
+        model_name = request.model or (available_models[0] if available_models else None)
+        if not model_name:
+            raise ValueError("Немає доступних моделей")
+
+        llm = self._get_llama(model_name)
+
+        # КРИТИЧНО: примусово вмикаємо правильний шаблон для всіх Llama-3/3.1/3.2
+        force_chat_template = any(x in model_name.lower() for x in ["llama-3", "llama3"])
 
         try:
-            from llama_cpp import Llama
+            # Формуємо messages у правильному форматі
+            messages = []
 
-            n_gpu_layers = self.config.get("gpu_layers", -1)
-            if n_gpu_layers == -1:
-                n_gpu_layers = 999  # усі шари на GPU
+            # Системне повідомлення (якщо є)
+            if request.system_message:
+                messages.append({"role": "system", "content": request.system_message.strip()})
+            else:
+                # Дефолтна система для Llama-3 — без неї модель часто з’їжджає
+                messages.append({"role": "system", "content": "Ти — корисний і дружній асистент."})
 
-            # КРИТИЧНО: правильні параметри для llama-cpp-python
-            llm = Llama(
-                model_path=str(model_path),
-                n_ctx=settings.context_size or 8192,
-                n_batch=512,
-                n_threads=settings.n_threads or max(1, os.cpu_count() - 1),
-                n_gpu_layers=n_gpu_layers,
-                verbose=False,
-                logits_all=False,  # ОБОВ'ЯЗКОВО False для швидкості!
-                use_mlock=True,
-                use_mmap=True,
+            # Додаємо контекст, якщо є
+            if request.context:
+                for msg in request.context:
+                    role = msg.get("role", "user")
+                    content = msg.get("content", "")
+                    if role in {"user", "assistant", "system"} and content:
+                        messages.append({"role": role, "content": content})
+
+            # Останнє повідомлення користувача
+            messages.append({"role": "user", "content": request.prompt.strip()})
+
+            # === УНІВЕРСАЛЬНИЙ CHAT COMPLETION ===
+            stream = llm.create_chat_completion(
+                messages=messages,
+                max_tokens=request.max_tokens or 1024,
+                temperature=request.temperature or 0.4,
+                top_p=request.top_p or 0.95,
+                top_k=request.top_k or 40,
+                repeat_penalty=1.1,
+                stop=request.stop_sequences or None,
+                stream=True,
             )
-            
-            self.loaded_models[model_name] = llm
-            logger.info(f"✓ Завантажено модель: {model_name} (GPU layers: {n_gpu_layers})")
-            return llm
-            
-        except Exception as e:
-            logger.error(f"✗ Помилка завантаження моделі {model_name}: {e}")
-            raise
 
+            for chunk in stream:
+                content = chunk["choices"][0]["delta"].get("content")
+                if content is not None:
+                    logger.info(f"✓ Генеровано {len(content)} символів: {content}")
+                    yield content
+
+                if chunk["choices"][0].get("finish_reason") is not None:
+                    break
+
+        except Exception as e:
+            logger.error(f"Помилка генерації ({model_name}): {e}", exc_info=True)
+            raise
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
-        """Звичайна генерація (non-streaming)"""
+        """Звичайна (не потокова) генерація"""
         start_time = time.time()
         result = ""
 
@@ -107,67 +175,6 @@ class LocalProvider(BaseLLMProvider):
             provider="local_provider",
             generation_time=round(generation_time, 3),
         )
-
-    async def generate_stream(self, request: GenerationRequest) -> AsyncGenerator[str, None]:
-        """Потокова генерація з правильними параметрами"""
-        available_models = await self.list_models()
-        model_name = request.model or (available_models[0] if available_models else None)
-        
-        if not model_name:
-            raise ValueError("Немає доступних моделей")
-
-        llm = self._get_llama(model_name)
-
-        # Параметри генерації (БЕЗ cache_prompt!)
-        completion_kwargs = {
-            "prompt": request.prompt,
-            "max_tokens": request.max_tokens or 1024,
-            "temperature": request.temperature or 0.7,
-            "top_p": request.top_p or 0.9,
-            "top_k": request.top_k or 40,
-            "repeat_penalty": 1.1,
-            "stop": request.stop_sequences or [],
-            "stream": True,
-            "echo": False,
-        }
-
-        try:
-            logger.debug(f"Генерація для моделі {model_name}: prompt_len={len(request.prompt)}")
-            stream = llm.create_completion(**completion_kwargs)
-
-            for chunk in stream:
-                try:
-                    # Правильний парсинг відповіді llama-cpp-python
-                    choices = chunk.get("choices", [])
-                    if not choices:
-                        continue
-                    
-                    choice = choices[0]
-                    
-                    # Для потокового режиму може бути "delta" або "text"
-                    text = ""
-                    if "delta" in choice:
-                        text = choice["delta"].get("content", "")
-                    elif "text" in choice:
-                        text = choice.get("text", "")
-                    
-                    # Перевірка на finish_reason
-                    finish_reason = choice.get("finish_reason")
-                    if finish_reason:
-                        logger.debug(f"Завершення генерації: {finish_reason}")
-                        break
-                    
-                    if text:
-                        yield text
-                        
-                except (KeyError, IndexError, TypeError) as e:
-                    logger.debug(f"Пропущено чанк: {e}")
-                    continue
-
-        except Exception as e:
-            logger.error(f"Помилка в generate_stream: {e}", exc_info=True)
-            raise
-
     def get_model_info(self, model_name: str) -> Optional[Dict[str, Any]]:
         """Метадані моделі"""
         path = self._resolve_path(model_name)

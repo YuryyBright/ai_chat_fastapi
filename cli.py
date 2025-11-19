@@ -1,154 +1,111 @@
 # cli.py
 """
-Оновлений CLI для Local LLM Service (2025)
-Виправлено парсинг відповідей та стрімінг
+Універсальний CLI для Local LLM Service (2025)
++ Повноцінний інтерактивний чат з збереженням контексту
++ Коректний стрімінг та вивід
 """
 
 import click
 import requests
 import json
 import time
-from typing import Optional, Generator, Any
+from typing import Optional, Generator, List, Dict
 from rich.console import Console
 from rich.table import Table
 from rich.progress import Progress, SpinnerColumn, TextColumn, BarColumn, TimeRemainingColumn
 from rich.panel import Panel
 from rich.syntax import Syntax
 from rich.markdown import Markdown
+from rich.live import Live
+from rich.text import Text
 
 console = Console()
 
 
 class LLMClient:
-    """Універсальний клієнт для Local LLM Service (підтримує v1 та v2 API)"""
-    
     def __init__(self, base_url: str = "http://localhost:8000"):
         self.base_url = base_url.rstrip("/")
         self.session = requests.Session()
         self.session.headers.update({"Content-Type": "application/json"})
-        self.version = self._detect_version()
-
-    def _detect_version(self) -> str:
-        """Автовизначення версії API"""
-        try:
-            r = self.session.get(f"{self.base_url}/health", timeout=3)
-            if r.status_code == 200:
-                data = r.json()
-                if "version" in data:
-                    return data.get("version", "v2")
-        except:
-            pass
-        return "v2"  # fallback
 
     def _stream_sse(self, url: str, json_data: dict) -> Generator[dict, None, None]:
-        """Правильний парсер Server-Sent Events"""
         try:
             with self.session.post(url, json=json_data, stream=True, timeout=3600) as r:
                 r.raise_for_status()
                 buffer = ""
-                
+
                 for line in r.iter_lines(decode_unicode=True):
                     if not line:
                         continue
-                    
                     line = line.strip()
-                    
                     if line.startswith("data: "):
                         data = line[6:].strip()
-                        
-                        if data in ("[DONE]", "[DONE]\n"):
-                            break
-                        
-                        if data == "":
+                        if not data or data == "[DONE]":
                             continue
-                        
                         try:
-                            yield json.loads(data)
-                        except json.JSONDecodeError as e:
-                            console.print(f"[dim red]JSON помилка: {data[:100]}[/dim red]")
-                            
-        except requests.exceptions.RequestException as e:
+                            chunk = json.loads(data)
+                            yield chunk
+                        except json.JSONDecodeError:
+                            # Іноді приходить не JSON (наприклад, OpenAI v1), ігноруємо
+                            continue
+        except requests.RequestException as e:
             console.print(f"[red]Помилка з'єднання:[/red] {e}")
             raise click.Abort()
 
-    def generate(self, prompt: str, model: Optional[str] = None, stream: bool = True, **kwargs):
-        """Генерація тексту — автоматично вибирає правильний ендпоінт"""
-        if self.version.startswith("v1"):
-            url = f"{self.base_url}/v1/chat/completions"
-            payload = {
-                "model": model or "local",
-                "messages": [{"role": "user", "content": prompt}],
-                "stream": stream,
-                **{k: v for k, v in kwargs.items() if v is not None}
-            }
+    def generate_stream(self, prompt: str, model: Optional[str] = None, history: List[Dict] = None, **kwargs):
+        payload = {
+            "prompt": prompt,
+            "model": model,
+            "stream": True,
+            "temperature": kwargs.get("temperature", 0.8),
+            "max_tokens": kwargs.get("max_tokens", 2048),
+            "stop_sequences": kwargs.get("stop_sequences"),
+        }
+
+        # Якщо є історія — додаємо як context
+        if history:
+            messages = []
+            for msg in history:
+                role = "assistant" if msg["role"] == "assistant" else "user"
+                messages.append({"role": role, "content": msg["content"]})
+            messages.append({"role": "user", "content": prompt})
+            payload["context"] = messages
         else:
-            url = f"{self.base_url}/generate/stream" if stream else f"{self.base_url}/generate"
-            payload = {
-                "prompt": prompt,
-                "model": model,
-                **kwargs
-            }
+            payload["prompt"] = prompt
 
-        if not stream:
-            resp = self.session.post(url, json=payload, timeout=300)
-            resp.raise_for_status()
-            return resp.json()
+        return self._stream_sse(f"{self.base_url}/generate/stream", payload)
 
-        return self._stream_sse(url, payload)
+    def generate(self, prompt: str, model: Optional[str] = None, **kwargs):
+        payload = {
+            "prompt": prompt,
+            "model": model,
+            "temperature": kwargs.get("temperature", 0.8),
+            "max_tokens": kwargs.get("max_tokens", 2048),
+        }
+        resp = self.session.post(f"{self.base_url}/generate", json=payload, timeout=300)
+        resp.raise_for_status()
+        return resp.json()
 
     def list_models(self):
         resp = self.session.get(f"{self.base_url}/models/list")
         resp.raise_for_status()
         return resp.json()
 
-    def download_model(self, repo_id: str, filename: Optional[str] = None, model_type: str = "gguf"):
-        url = f"{self.base_url}/models/download"
-        payload = {
-            "repo_id": repo_id,
-            "model_type": model_type,
-            "filename": filename
-        }
-        return self._stream_sse(url, payload)
-
-    def search_models(self, query: str = "", limit: int = 20):
-        resp = self.session.post(
-            f"{self.base_url}/models/search",
-            json={"query": query, "limit": limit},
-            timeout=60
-        )
-        resp.raise_for_status()
-        return resp.json()
-
-    def list_repo_files(self, repo_id: str):
-        resp = self.session.get(f"{self.base_url}/models/files/{repo_id}")
-        resp.raise_for_status()
-        return resp.json()
-
-    def delete_model(self, model_name: str):
-        resp = self.session.delete(f"{self.base_url}/models/delete", json={"model_name": model_name})
-        resp.raise_for_status()
-        return resp.json()
-
-    def model_info(self, model_name: str):
-        resp = self.session.get(f"{self.base_url}/models/info/{model_name}")
-        resp.raise_for_status()
-        return resp.json()
-
     def health(self):
         try:
-            resp = self.session.get(f"{self.base_url}/health", timeout=5)
-            resp.raise_for_status()
-            return resp.json()
+            r = self.session.get(f"{self.base_url}/health", timeout=5)
+            r.raise_for_status()
+            return r.json()
         except:
-            return {"status": "unavailable", "provider": "unknown"}
+            return {"status": "down"}
 
 
 @click.group()
 @click.option('--url', '-u', default='http://localhost:8000', help='URL сервера')
+@click.option('--model', '-m', default=None, help='Модель за замовчуванням')
 @click.pass_context
-def cli(ctx, url):
-    """Local LLM Service CLI — повне керування локальними моделями"""
-    ctx.obj = LLMClient(base_url=url)
+def cli(ctx, url, model):
+    ctx.obj = {"client": LLMClient(base_url=url), "default_model": model}
 
 
 @cli.command()
@@ -156,12 +113,15 @@ def cli(ctx, url):
 @click.option('--model', '-m', help='Назва моделі')
 @click.option('--temp', '-t', type=float, default=0.8)
 @click.option('--max-tokens', type=int, default=2048)
-@click.option('--no-stream', is_flag=True, help='Без потокової передачі')
+@click.option('--no-stream', is_flag=True, help='Без стрімінгу')
 @click.pass_obj
-def ask(client: LLMClient, prompt, model, temp, max_tokens, no_stream):
-    """Запит до моделі"""
+def ask(obj, prompt, model, temp, max_tokens, no_stream):
+    """Одноразовий запит"""
+    client = obj["client"]
+    model = model or obj["default_model"]
+
     if not prompt:
-        prompt = click.prompt("Промпт", type=str)
+        prompt = click.prompt("Промпт")
     else:
         prompt = " ".join(prompt)
 
@@ -169,176 +129,136 @@ def ask(client: LLMClient, prompt, model, temp, max_tokens, no_stream):
 
     try:
         if no_stream:
-            with Progress(SpinnerColumn(), TextColumn("Генерація..."), console=console) as p:
-                p.add_task("gen")
-                result = client.generate(prompt, model, stream=False,
-                                        temperature=temp, max_tokens=max_tokens)
-            
-            # Парсинг відповіді v2 API
+            result = client.generate(prompt, model, temperature=temp, max_tokens=max_tokens)
             text = result.get("generated_text", "")
-            
-            console.print(f"\n[bold green]Відповідь:[/bold green]\n")
+            console.print(f"[bold green]Відповідь:[/bold green]\n")
             console.print(Markdown(text))
         else:
-            console.print("[bold green]Відповідь:[/bold green]\n")
+            console.print("[bold green]Відповідь:[/bold green]")
             full = ""
-            
-            for chunk in client.generate(prompt, model, stream=True,
-                                       temperature=temp, max_tokens=max_tokens):
-                # Парсинг v2 API стрімінгу
+            for chunk in client.generate_stream(prompt, model, temperature=temp, max_tokens=max_tokens):
                 text = chunk.get("text", "")
-                done = chunk.get("done", False)
-                error = chunk.get("error")
-                
-                if error:
-                    console.print(f"\n[red]Помилка:[/red] {error}")
-                    break
-                
                 if text:
                     console.print(text, end="")
                     full += text
-                
-                if done:
-                    break
-            
             console.print("\n")
-            
     except Exception as e:
-        console.print(f"[red]Помилка генерації:[/red] {e}")
+        console.print(f"[red]Помилка:[/red] {e}")
         raise click.Abort()
 
 
 @cli.command()
+@click.option('--model', '-m', help='Модель для чату')
+@click.option('--temp', '-t', type=float, default=0.8)
+@click.option('--system', '-s', default=None, help='Системне повідомлення')
 @click.pass_obj
-def models(client: LLMClient):
-    """Список локальних моделей"""
+def chat(obj, model, temp, system):
+    """Інтерактивний чат з пам’яттю"""
+    client = obj["client"]
+    model = model or obj["default_model"]
+
+    if not model:
+        # Автовизначення моделі
+        try:
+            models = client.list_models().get("models", [])
+            if models:
+                model = models[0]["name"]
+                console.print(f"[dim]Використовується модель: {model}[/dim]")
+            else:
+                console.print("[red]Немає доступних моделей![/red]")
+                return
+        except:
+            console.print("[red]Не вдалося отримати список моделей[/red]")
+            return
+
+    history = []
+    if system:
+        history.append({"role": "system", "content": system})
+
+    console.print(Panel(
+        f"[bold cyan]Чат з моделлю:[/bold cyan] {model}\n"
+        f"[dim]Температура: {temp} | Введіть повідомлення (або /exit, /clear, /model)[/dim]",
+        title="Local LLM Chat",
+        border_style="bright_blue"
+    ))
+
+    while True:
+        try:
+            user_input = click.prompt("\n[bold yellow]Ти[/bold yellow]", default="", show_default=False)
+            
+            if user_input.strip() in {"", "/exit", "quit", "вихід"}:
+                console.print("[dim]Бувай![/dim]")
+                break
+            if user_input.strip() == "/clear":
+                history = [{"role": "system", "content": system or "Ти — корисний асистент."}]
+                console.print("[dim]Історія очищена[/dim]")
+                continue
+            if user_input.strip() == "/model":
+                console.print(f"[dim]Поточна модель: {model}[/dim]")
+                continue
+
+            history.append({"role": "user", "content": user_input})
+            console.print(f"[bold green]Модель[/bold green]: ", end="")
+
+            full_response = ""
+            try:
+                for chunk in client.generate_stream(
+                    prompt=user_input,
+                    model=model,
+                    history=history[:-1],  # передаємо попередню історію
+                    temperature=temp
+                ):
+                    text = chunk.get("text", "")
+                    if text:
+                        console.print(text, end="")
+                        full_response += text
+                console.print()  # новий рядок
+            except KeyboardInterrupt:
+                console.print("\n[dim]Перервано[/dim]")
+                continue
+            except Exception as e:
+                console.print(f"\n[red]Помилка:[/red] {e}")
+                continue
+
+            if full_response.strip():
+                history.append({"role": "assistant", "content": full_response})
+
+        except (EOFError, KeyboardInterrupt):
+            console.print("\n[dim]До побачення![/dim]")
+            break
+
+
+@cli.command()
+@click.pass_obj
+def models(obj):
+    """Список моделей"""
     try:
-        data = client.list_models()
+        data = obj["client"].list_models()
         table = Table(title="Локальні моделі")
         table.add_column("Назва", style="cyan")
         table.add_column("Статус", style="green")
         table.add_column("Розмір", style="yellow")
-        table.add_column("Тип", style="magenta")
 
         for m in data.get("models", []):
             meta = m.get("metadata", {})
-            size = meta.get("size_mb", meta.get("size", "невідомо"))
+            size = meta.get("size_mb", "?")
             if isinstance(size, (int, float)):
-                size = f"{size} MB"
-            typ = meta.get("type", "gguf")
-            table.add_row(m["name"], m["status"], str(size), typ)
+                size = f"{size:.1f} MB"
+            table.add_row(m["name"], m["status"], str(size))
 
         console.print(table)
-        console.print(f"[bold]Всього:[/bold] {data.get('total', 0)}")
+        console.print(f"[bold]Всього:[/bold] {len(data.get('models', []))}")
     except Exception as e:
-        console.print(f"[red]Не вдалося отримати список моделей:[/red] {e}")
-
-
-@cli.command()
-@click.argument('repo_id')
-@click.option('--filename', '-f', help='GGUF файл (наприклад: model-q5_k_m.gguf)')
-@click.option('--type', 'model_type', type=click.Choice(['gguf', 'huggingface']), default='gguf')
-@click.pass_obj
-def download(client: LLMClient, repo_id, filename, model_type):
-    """Завантажити модель з HuggingFace"""
-    if model_type == "gguf" and not filename:
-        console.print("[yellow]Отримуємо список GGUF файлів...[/yellow]")
-        try:
-            files = client.list_repo_files(repo_id).get("files", [])
-            ggufs = [f for f in files if f.lower().endswith(".gguf")]
-            if not ggufs:
-                console.print("[red]GGUF файли не знайдено[/red]")
-                raise click.Abort()
-            for i, f in enumerate(ggufs[:10], 1):
-                console.print(f"  {i}. {f}")
-            choice = click.prompt("Виберіть файл (номер)", type=int, default=1)
-            filename = ggufs[choice - 1]
-        except Exception as e:
-            console.print(f"[red]Не вдалося отримати файли:[/red] {e}")
-            raise click.Abort()
-
-    console.print(f"[bold yellow]Завантажується:[/bold yellow] {repo_id} → {filename or 'весь репозиторій'}")
-
-    with Progress(
-        TextColumn("[bold blue]{task.description}"),
-        BarColumn(),
-        "[progress.percentage]{task.percentage:>3.0f}%",
-        TimeRemainingColumn(),
-        console=console
-    ) as progress:
-        task = progress.add_task("Завантаження", total=100)
-        try:
-            for event in client.download_model(repo_id, filename, model_type):
-                if event.get("progress") is not None:
-                    progress.update(task, completed=event["progress"])
-                if event["status"] == "complete":
-                    progress.update(task, completed=100)
-                    console.print(f"[bold green]Готово![/bold green] {event.get('model_path', '')}")
-                elif event["status"] == "error":
-                    console.print(f"[bold red]Помилка:[/bold red] {event.get('message')}")
-        except Exception as e:
-            console.print(f"[red]Перервано:[/red] {e}")
-
-
-@cli.command()
-@click.argument('query', required=False)
-@click.option('--limit', '-l', default=15)
-@click.pass_obj
-def search(client: LLMClient, query, limit):
-    """Пошук GGUF моделей на HF"""
-    query = query or ""
-    with Progress(SpinnerColumn(), TextColumn("Пошук..."), console=console) as p:
-        p.add_task("search")
-        results = client.search_models(query, limit)
-    table = Table(title=f"Знайдено за запитом: [bold]'{query}'[/bold]")
-    table.add_column("ID", style="green")
-    table.add_column("Завантаження", justify="right")
-    table.add_column("Лайки", justify="right")
-    for m in results.get("models", []):
-        table.add_row(m["id"], str(m.get("downloads", 0)), str(m.get("likes", 0)))
-    console.print(table)
-
-
-@cli.command()
-@click.argument('model_name')
-@click.pass_obj
-def info(client: LLMClient, model_name):
-    """Детальна інформація про модель"""
-    try:
-        data = client.model_info(model_name)
-        info = data["model"]
-        console.print(Panel(
-            Syntax(json.dumps(info, indent=2, ensure_ascii=False), "json", theme="monokai"),
-            title=f"[bold cyan]{model_name}[/bold cyan]",
-            border_style="bright_blue"
-        ))
-    except Exception as e:
-        console.print(f"[red]Модель не знайдена:[/red] {e}")
-
-
-@cli.command()
-@click.argument('model_name')
-@click.confirmation_option(prompt='Видалити модель назавжди?')
-@click.pass_obj
-def delete(client: LLMClient, model_name):
-    """Видалити модель"""
-    try:
-        client.delete_model(model_name)
-        console.print(f"[bold green]Видалено:[/bold green] {model_name}")
-    except Exception as e:
-        console.print(f"[red]Помилка видалення:[/red] {e}")
+        console.print(f"[red]Помилка:[/red] {e}")
 
 
 @cli.command()
 @click.pass_obj
-def health(client: LLMClient):
-    """Стан сервера"""
-    data = client.health()
+def health(obj):
+    data = obj["client"].health()
     status = data.get("status", "unknown")
-    color = "green" if status == "healthy" else "red"
-    console.print(f"Статус: [{color}]{status.upper()}[/{color}]")
-    if "provider" in data:
-        console.print(f"Провайдер: {data['provider']}")
+    color = "green" if "healthy" in status.lower() else "red"
+    console.print(f"Сервер: [{color}]{status.upper()}[/{color}]")
 
 
 if __name__ == '__main__':

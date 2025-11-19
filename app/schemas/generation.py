@@ -90,7 +90,12 @@ class GenerationRequest(BaseModel):
         default=None,
         description="Контекст розмови для чат-моделей"
     )
-    
+    repeat_penalty: Optional[float] = Field(
+        default=1.1,
+        ge=0.0,
+        le=2.0,
+        description="Класичний repeat_penalty (llama.cpp стиль). Використовується, якщо > 0"
+    )
     class Config:
         json_schema_extra = {
             "example": {
