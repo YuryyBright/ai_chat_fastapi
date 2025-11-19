@@ -1,99 +1,101 @@
 # app/schemas/generation.py
 """
-Pydantic schemas for text generation requests and responses
+Pydantic schemas для генерації тексту
+Виправлено provider на local_provider
 """
 
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Optional, List, Dict, Any, Literal
 from datetime import datetime
 
 
 class GenerationRequest(BaseModel):
-    """Schema for text generation request"""
+    """Schema для запиту генерації тексту"""
     
     prompt: str = Field(
         ...,
-        description="Input prompt for text generation",
+        description="Вхідний промпт для генерації",
         min_length=1,
-        max_length=10000
+        max_length=100000
     )
     
-    provider: Literal["ollama", "huggingface", "openai"] = Field(
-        default="ollama",
-        description="LLM provider to use"
+    provider: Literal["local_provider"] = Field(
+        default="local_provider",
+        description="Провайдер LLM (тільки local_provider)"
     )
     
     model: Optional[str] = Field(
         default=None,
-        description="Model name (uses default if not specified)"
+        description="Назва моделі (використовується перша доступна, якщо не вказано)"
     )
     
     max_tokens: Optional[int] = Field(
-        default=None,
+        default=1024,
         ge=1,
         le=32768,
-        description="Maximum tokens to generate"
+        description="Максимальна кількість токенів для генерації"
     )
     
     temperature: Optional[float] = Field(
         default=0.7,
         ge=0.0,
         le=2.0,
-        description="Sampling temperature"
+        description="Температура семплювання"
     )
     
     top_p: Optional[float] = Field(
         default=0.9,
         ge=0.0,
         le=1.0,
-        description="Nucleus sampling parameter"
+        description="Nucleus sampling параметр"
     )
     
     top_k: Optional[int] = Field(
-        default=None,
+        default=40,
         ge=1,
-        description="Top-k sampling parameter"
+        le=100,
+        description="Top-k sampling параметр"
     )
     
     stream: bool = Field(
         default=False,
-        description="Enable streaming response"
+        description="Увімкнути потокову відповідь"
     )
     
     stop_sequences: Optional[List[str]] = Field(
         default=None,
-        description="Stop generation at these sequences"
+        description="Зупинити генерацію на цих послідовностях"
     )
     
     presence_penalty: Optional[float] = Field(
         default=0.0,
         ge=-2.0,
         le=2.0,
-        description="Presence penalty for token repetition"
+        description="Штраф за присутність для повторення токенів"
     )
     
     frequency_penalty: Optional[float] = Field(
         default=0.0,
         ge=-2.0,
         le=2.0,
-        description="Frequency penalty for token repetition"
+        description="Штраф за частоту для повторення токенів"
     )
     
     system_message: Optional[str] = Field(
         default=None,
-        description="System message for chat models"
+        description="Системне повідомлення для чат-моделей"
     )
     
     context: Optional[List[Dict[str, str]]] = Field(
         default=None,
-        description="Conversation context for chat models"
+        description="Контекст розмови для чат-моделей"
     )
     
     class Config:
         json_schema_extra = {
             "example": {
-                "prompt": "Explain quantum computing in simple terms",
-                "provider": "ollama",
+                "prompt": "Поясни квантові обчислення простими словами",
+                "provider": "local_provider",
                 "model": "llama2",
                 "max_tokens": 500,
                 "temperature": 0.7,
@@ -103,133 +105,68 @@ class GenerationRequest(BaseModel):
 
 
 class GenerationResponse(BaseModel):
-    """Schema for text generation response"""
+    """Schema для відповіді генерації"""
     
     generated_text: str = Field(
         ...,
-        description="Generated text"
+        description="Згенерований текст"
     )
     
     model: str = Field(
         ...,
-        description="Model used for generation"
+        description="Модель, використана для генерації"
     )
     
     provider: str = Field(
         ...,
-        description="Provider used"
+        description="Використаний провайдер"
     )
     
     tokens_used: Optional[int] = Field(
         default=None,
-        description="Number of tokens used"
+        description="Кількість використаних токенів"
     )
     
     finish_reason: Optional[str] = Field(
         default=None,
-        description="Reason for generation completion"
+        description="Причина завершення генерації"
     )
     
     generation_time: float = Field(
         ...,
-        description="Generation time in seconds"
+        description="Час генерації в секундах"
     )
     
     timestamp: datetime = Field(
         default_factory=datetime.utcnow,
-        description="Response timestamp"
+        description="Час відповіді"
     )
     
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Additional metadata"
+        description="Додаткові метадані"
     )
 
 
 class StreamChunk(BaseModel):
-    """Schema for streaming response chunk"""
+    """Schema для чанку потокової відповіді"""
     
     text: str = Field(
-        ...,
-        description="Text chunk"
+        default="",
+        description="Текстовий чанк"
     )
     
     done: bool = Field(
         default=False,
-        description="Indicates if generation is complete"
+        description="Позначає, чи завершена генерація"
+    )
+    
+    error: Optional[str] = Field(
+        default=None,
+        description="Повідомлення про помилку (якщо є)"
     )
     
     metadata: Optional[Dict[str, Any]] = Field(
         default=None,
-        description="Chunk metadata"
+        description="Метадані чанку"
     )
-
-
-# app/schemas/models.py
-"""
-Pydantic schemas for model management
-"""
-
-from pydantic import BaseModel, Field
-from typing import Optional, List, Dict, Any
-from datetime import datetime
-
-
-class ModelInfo(BaseModel):
-    """Schema for model information"""
-    
-    name: str = Field(
-        ...,
-        description="Model name"
-    )
-    
-    provider: str = Field(
-        ...,
-        description="Provider name"
-    )
-    
-    type: str = Field(
-        ...,
-        description="Model type (e.g., 'chat', 'completion')"
-    )
-    
-    size: Optional[str] = Field(
-        default=None,
-        description="Model size (e.g., '7B', '13B')"
-    )
-    
-    capabilities: List[str] = Field(
-        default_factory=list,
-        description="Model capabilities"
-    )
-    
-    parameters: Optional[Dict[str, Any]] = Field(
-        default=None,
-        description="Model parameters"
-    )
-    
-    status: str = Field(
-        default="available",
-        description="Model status"
-    )
-    
-    last_updated: Optional[datetime] = Field(
-        default=None,
-        description="Last update timestamp"
-    )
-
-
-class ModelListResponse(BaseModel):
-    """Schema for model list response"""
-    
-    models: List[ModelInfo] = Field(
-        default_factory=list,
-        description="List of available models"
-    )
-    
-    total: int = Field(
-        ...,
-        description="Total number of models"
-    )
-
-

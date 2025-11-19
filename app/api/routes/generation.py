@@ -1,7 +1,7 @@
 # app/api/routes/generation.py
 """
 API роути для генерації тексту
-Виправлені проблеми зі стрімінгом
+Виправлені проблеми зі стрімінгом та обробкою відповідей
 """
 
 from fastapi import APIRouter, Request, HTTPException, Depends
@@ -26,6 +26,7 @@ def get_provider_manager(request: Request) -> ProviderManager:
 
 
 class StreamChunk(BaseModel):
+    """Модель для SSE чанку"""
     text: str = ""
     done: bool = False
     error: str | None = None
@@ -69,6 +70,7 @@ async def generate_text_stream(
 ):
     """
     Потокова генерація через Server-Sent Events (SSE)
+    
     Формат чанку:
     data: {"text": "Привіт", "done": false}
     data: {"text": "", "done": true}

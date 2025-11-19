@@ -7,8 +7,9 @@ from app.core.providers.base import BaseLLMProvider
 from app.config import settings
 import logging
 import time
-from datetime import datetime
+
 logger = logging.getLogger(__name__)
+
 
 class LocalProvider(BaseLLMProvider):
     def __init__(self, config: Dict[str, Any]):
@@ -66,7 +67,7 @@ class LocalProvider(BaseLLMProvider):
             if n_gpu_layers == -1:
                 n_gpu_layers = 999  # усі шари на GPU
 
-            # КРИТИЧНО: logits_all=False для швидкості
+            # КРИТИЧНО: правильні параметри для llama-cpp-python
             llm = Llama(
                 model_path=str(model_path),
                 n_ctx=settings.context_size or 8192,
@@ -74,7 +75,7 @@ class LocalProvider(BaseLLMProvider):
                 n_threads=settings.n_threads or max(1, os.cpu_count() - 1),
                 n_gpu_layers=n_gpu_layers,
                 verbose=False,
-                logits_all=False,  # ОБОВ'ЯЗКОВО False!
+                logits_all=False,  # ОБОВ'ЯЗКОВО False для швидкості!
                 use_mlock=True,
                 use_mmap=True,
             )
@@ -88,6 +89,7 @@ class LocalProvider(BaseLLMProvider):
             raise
 
     async def generate(self, request: GenerationRequest) -> GenerationResponse:
+        """Звичайна генерація (non-streaming)"""
         start_time = time.time()
         result = ""
 
@@ -102,7 +104,7 @@ class LocalProvider(BaseLLMProvider):
         return GenerationResponse(
             generated_text=result.strip(),
             model=model_name,
-            provider="local",
+            provider="local_provider",
             generation_time=round(generation_time, 3),
         )
 
@@ -116,7 +118,7 @@ class LocalProvider(BaseLLMProvider):
 
         llm = self._get_llama(model_name)
 
-        # Параметри генерації (БЕЗ cache_prompt тут!)
+        # Параметри генерації (БЕЗ cache_prompt!)
         completion_kwargs = {
             "prompt": request.prompt,
             "max_tokens": request.max_tokens or 1024,
@@ -143,12 +145,17 @@ class LocalProvider(BaseLLMProvider):
                     choice = choices[0]
                     
                     # Для потокового режиму може бути "delta" або "text"
+                    text = ""
                     if "delta" in choice:
                         text = choice["delta"].get("content", "")
                     elif "text" in choice:
                         text = choice.get("text", "")
-                    else:
-                        continue
+                    
+                    # Перевірка на finish_reason
+                    finish_reason = choice.get("finish_reason")
+                    if finish_reason:
+                        logger.debug(f"Завершення генерації: {finish_reason}")
+                        break
                     
                     if text:
                         yield text
@@ -168,7 +175,6 @@ class LocalProvider(BaseLLMProvider):
             return None
 
         try:
-            # Базова інформація без завантаження моделі
             info = {
                 "name": model_name,
                 "path": str(path),
